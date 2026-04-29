@@ -6,29 +6,27 @@ Upload COOIS + MB52 (and optionally ZMPO), click Build, download the Excel.
 
 import io
 import logging
+import os
+import sys
 from datetime import datetime
 
 import pandas as pd
 import streamlit as st
 from openpyxl import Workbook
 
-try:
-    from scripts.build_readiness import (
-        aggregate_to_jobs,
-        annotate_with_pos,
-        build_component_detail,
-        build_how_it_works,
-        build_readiness_board,
-        build_stock_ledger,
-        load_components,
-        load_pos,
-        load_stock,
-        simulate_picks,
-    )
-except Exception as _import_err:
-    import streamlit as st
-    st.error(f"Import failed: {_import_err}")
-    st.stop()
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts"))
+from build_readiness import (
+    aggregate_to_jobs,
+    annotate_with_pos,
+    build_component_detail,
+    build_how_it_works,
+    build_readiness_board,
+    build_stock_ledger,
+    load_components,
+    load_pos,
+    load_stock,
+    simulate_picks,
+)
 
 READINESS_BG = {"READY": "#C6EFCE", "PARTIAL": "#FFEB9C", "NOT READY": "#FFC7CE"}
 COMPONENT_BG = {"COVERED": "#C6EFCE", "PARTIAL": "#FFEB9C", "SHORT": "#FFC7CE"}
