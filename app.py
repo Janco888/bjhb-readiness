@@ -14,7 +14,11 @@ import pandas as pd
 import streamlit as st
 from openpyxl import Workbook
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts"))
+_scripts_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts")
+st.write("DEBUG scripts_dir:", _scripts_dir)
+st.write("DEBUG exists:", os.path.exists(_scripts_dir))
+st.write("DEBUG contents:", os.listdir(_scripts_dir) if os.path.exists(_scripts_dir) else "NOT FOUND")
+sys.path.insert(0, _scripts_dir)
 from build_readiness import (
     aggregate_to_jobs,
     annotate_with_pos,
