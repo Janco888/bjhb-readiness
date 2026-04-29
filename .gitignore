@@ -11,6 +11,9 @@ env/
 inputs/*.xlsx
 inputs/*.xls
 inputs/*.csv
+inputs/archive/*.xlsx
+inputs/archive/*.xls
+inputs/archive/*.csv
 outputs/*.xlsx
 
 # But keep the folder structure
