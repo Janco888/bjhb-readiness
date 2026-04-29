@@ -1,0 +1,36 @@
+[project]
+name = "bjhb-readiness"
+version = "1.0.0"
+description = "BJHB Production Job Readiness Board - Virtual pick simulation using COOIS + MB52"
+requires-python = ">=3.10"
+authors = [
+    {name = "Janco", email = "janco@example.com"},
+]
+dependencies = [
+    "pandas>=2.0.0",
+    "openpyxl>=3.1.0",
+    "numpy>=1.24.0",
+    "streamlit>=1.35.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["scripts"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.black]
+line-length = 100
+target-version = ['py310']

@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+env/
+
+# SAP exports — never commit actual data
+inputs/*.xlsx
+inputs/*.xls
+inputs/*.csv
+outputs/*.xlsx
+
+# But keep the folder structure
+!inputs/.gitkeep
+!inputs/archive/.gitkeep
+!outputs/.gitkeep
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# OS
+Thumbs.db
+
+# Logs
+*.log
+logs/
