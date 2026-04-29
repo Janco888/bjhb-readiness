@@ -4,33 +4,32 @@ BJHB Job Readiness Board — Streamlit App
 Upload COOIS + MB52 (and optionally ZMPO), click Build, download the Excel.
 """
 
+import importlib.util
 import io
 import logging
 import os
-import sys
 from datetime import datetime
 
 import pandas as pd
 import streamlit as st
 from openpyxl import Workbook
 
-_scripts_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts")
-st.write("DEBUG scripts_dir:", _scripts_dir)
-st.write("DEBUG exists:", os.path.exists(_scripts_dir))
-st.write("DEBUG contents:", os.listdir(_scripts_dir) if os.path.exists(_scripts_dir) else "NOT FOUND")
-sys.path.insert(0, _scripts_dir)
-from build_readiness import (
-    aggregate_to_jobs,
-    annotate_with_pos,
-    build_component_detail,
-    build_how_it_works,
-    build_readiness_board,
-    build_stock_ledger,
-    load_components,
-    load_pos,
-    load_stock,
-    simulate_picks,
-)
+_br_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts", "build_readiness.py")
+_spec = importlib.util.spec_from_file_location("build_readiness", _br_path)
+assert _spec is not None and _spec.loader is not None, f"Cannot load build_readiness from {_br_path}"
+_br = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_br)  # type: ignore[union-attr]
+
+aggregate_to_jobs = _br.aggregate_to_jobs
+annotate_with_pos = _br.annotate_with_pos
+build_component_detail = _br.build_component_detail
+build_how_it_works = _br.build_how_it_works
+build_readiness_board = _br.build_readiness_board
+build_stock_ledger = _br.build_stock_ledger
+load_components = _br.load_components
+load_pos = _br.load_pos
+load_stock = _br.load_stock
+simulate_picks = _br.simulate_picks
 
 READINESS_BG = {"READY": "#C6EFCE", "PARTIAL": "#FFEB9C", "NOT READY": "#FFC7CE"}
 COMPONENT_BG = {"COVERED": "#C6EFCE", "PARTIAL": "#FFEB9C", "SHORT": "#FFC7CE"}
