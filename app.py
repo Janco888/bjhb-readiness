@@ -34,6 +34,16 @@ simulate_picks = _br.simulate_picks
 READINESS_BG = {"READY": "#C6EFCE", "PARTIAL": "#FFEB9C", "NOT READY": "#FFC7CE"}
 COMPONENT_BG = {"COVERED": "#C6EFCE", "PARTIAL": "#FFEB9C", "SHORT": "#FFC7CE"}
 
+_COOIS_REQUIRED = [
+    "Order", "Material", "Material Description",
+    "Requirement Quantity", "Quantity withdrawn", "Procurement Type",
+    "Header Material Text", "Header Basic Start Date", "Header Basic Finish Date",
+]
+_PO_REQUIRED = [
+    "Material", "Purchasing Document", "PO-Quantity",
+    "GR-Quantity", "Delivery Date", "Name",
+]
+
 st.set_page_config(page_title="BJHB Job Readiness", layout="wide")
 
 st.title("BJHB Job Readiness Board")
@@ -50,6 +60,52 @@ with col2:
     mb52_file = st.file_uploader("MB52 Stock *", type=["xlsx"])
 with col3:
     po_file = st.file_uploader("ZMPO Purchase Orders (optional)", type=["xlsx"])
+
+with st.expander("What should be in each file?"):
+    t1, t2, t3 = st.columns(3)
+    with t1:
+        st.markdown(
+            "**COOIS Components** *(required)*\n\n"
+            "Transaction: `COOIS` → Component view\n\n"
+            "**Required columns:**\n"
+            "- Order\n"
+            "- Material & Material Description\n"
+            "- Requirement Quantity\n"
+            "- Quantity withdrawn\n"
+            "- Procurement Type\n"
+            "- Header Material Text\n"
+            "- Header Basic Start Date\n"
+            "- Header Basic Finish Date\n\n"
+            "**Tips:**\n"
+            "- Use the **Component** layout in COOIS\n"
+            "- Filter: **Released** orders only\n"
+            "- Date range: cover the next 4–8 weeks"
+        )
+    with t2:
+        st.markdown(
+            "**MB52 Stock** *(required)*\n\n"
+            "Transaction: `MB52`\n\n"
+            "**Tips:**\n"
+            "- Select your plant and all relevant storage locations\n"
+            "- Export in the **standard MB52 hierarchical layout** — do not reformat or sort\n"
+            "- Include all raw materials and bought-out parts\n"
+            "- A typical export has hundreds of rows minimum"
+        )
+    with t3:
+        st.markdown(
+            "**ZMPO Purchase Orders** *(optional)*\n\n"
+            "Transaction: `ZMPO` (custom report)\n\n"
+            "**Required columns:**\n"
+            "- Material\n"
+            "- Purchasing Document\n"
+            "- PO-Quantity & GR-Quantity\n"
+            "- Delivery Date\n"
+            "- Name\n\n"
+            "**Tips:**\n"
+            "- Include open/outstanding POs only\n"
+            "- Enables PO coverage column on short parts\n"
+            "- Leave blank if not available — the build still runs"
+        )
 
 st.divider()
 
@@ -71,6 +127,54 @@ if st.button("Build Dashboard", type="primary", disabled=not ready_to_run):
     log.propagate = False
 
     try:
+        # ── Pre-flight validation ──────────────────────────────────────────
+        val_errors = []
+
+        coois_file.seek(0)
+        try:
+            _df_coois_chk = pd.read_excel(coois_file)
+            missing = [c for c in _COOIS_REQUIRED if c not in _df_coois_chk.columns]
+            if missing:
+                val_errors.append(
+                    "**COOIS file is missing required columns:**\n\n"
+                    + "\n".join(f"- `{c}`" for c in missing)
+                    + "\n\nMake sure you exported from COOIS in **Component view** with the full layout."
+                )
+            elif len(_df_coois_chk) == 0:
+                val_errors.append("**COOIS file is empty.** Check your SAP filter settings.")
+            coois_file.seek(0)
+        except Exception as e:
+            val_errors.append(f"**COOIS file could not be read:** {e}")
+
+        mb52_file.seek(0)
+        try:
+            _df_mb52_chk = pd.read_excel(mb52_file, header=None, nrows=10)
+            if len(_df_mb52_chk) < 3:
+                val_errors.append("**MB52 file appears empty or too small.** Check your SAP export.")
+            mb52_file.seek(0)
+        except Exception as e:
+            val_errors.append(f"**MB52 file could not be read:** {e}")
+
+        if po_file:
+            po_file.seek(0)
+            try:
+                _df_po_chk = pd.read_excel(po_file)
+                missing_po = [c for c in _PO_REQUIRED if c not in _df_po_chk.columns]
+                if missing_po:
+                    val_errors.append(
+                        "**ZMPO file is missing required columns:**\n\n"
+                        + "\n".join(f"- `{c}`" for c in missing_po)
+                        + "\n\nCheck that you exported from the ZMPO transaction with the standard layout."
+                    )
+                po_file.seek(0)
+            except Exception as e:
+                val_errors.append(f"**ZMPO file could not be read:** {e}")
+
+        if val_errors:
+            for err in val_errors:
+                st.error(err)
+            st.stop()
+
         with st.spinner("Loading data..."):
             today = pd.Timestamp.today().normalize()
             today_str = today.strftime("%d %b %Y")
