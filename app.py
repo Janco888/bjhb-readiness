@@ -6,16 +6,13 @@ Upload COOIS + MB52 (and optionally ZMPO), click Build, download the Excel.
 
 import io
 import logging
-import sys
 from datetime import datetime
-from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 from openpyxl import Workbook
 
-sys.path.insert(0, str(Path(__file__).parent / "scripts"))
-from build_readiness import (  # noqa: E402
+from scripts.build_readiness import (
     aggregate_to_jobs,
     annotate_with_pos,
     build_component_detail,
