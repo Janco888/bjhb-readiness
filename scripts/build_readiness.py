@@ -81,24 +81,49 @@ def title_row(ws, row, text, bg, tc, sz, h, n=12):
 
 
 # ─── DATA LOADING ────────────────────────────────────────────────────────
+# Storage locations that count as available stock for production.
+# All other locations (quarantine, consignment, scrap, etc.) are excluded.
+_STOCK_LOCATIONS = {"0501", "J100", "J501", "05ES", "05ML", "0502"}
+
+
 def load_stock(path: Path, log: logging.Logger) -> dict[str, float]:
     """Parse MB52 hierarchical format → {material: unrestricted_qty}."""
     df = pd.read_excel(path, header=None)
     log.debug(f"MB52 raw: {len(df)} rows")
 
+    def to_num(x):
+        try: return float(str(x).replace(",", "")) if pd.notna(x) else 0.0
+        except (ValueError, TypeError): return 0.0
+
     mats = []
+    skipped_qty = 0.0
     i = 5
     while i < len(df):
         row = df.iloc[i]
         v0 = str(row[0]).strip() if pd.notna(row[0]) else ""
         if v0 and v0 not in ["nan", "Material", "Locat"] and pd.notna(row[9]):
-            if i + 1 < len(df):
-                q = df.iloc[i + 1]
-                def to_num(x):
-                    try: return float(x) if pd.notna(x) else 0.0
-                    except (ValueError, TypeError): return 0.0
-                mats.append({"Material": v0, "Unrestricted": to_num(q[5])})
-        i += 1
+            # Material header found — scan forward and sum allowed storage locations only.
+            # Blank col-0 rows are value/currency subtotals (ZAR etc.) — skip them.
+            total_qty = 0.0
+            j = i + 1
+            while j < len(df):
+                sub = df.iloc[j]
+                sub_v0 = str(sub[0]).strip() if pd.notna(sub[0]) else ""
+                # Stop when the next material header is reached
+                if sub_v0 and sub_v0 not in ["nan", "Material", "Locat"] and pd.notna(sub[9]):
+                    break
+                if sub_v0 and sub_v0 not in ["nan"]:
+                    qty = to_num(sub[5])
+                    if sub_v0 in _STOCK_LOCATIONS:
+                        total_qty += qty
+                    else:
+                        skipped_qty += qty
+                j += 1
+            if total_qty > 0:
+                mats.append({"Material": v0, "Unrestricted": total_qty})
+            i = j  # jump past all sub-rows just processed
+        else:
+            i += 1
 
     if not mats:
         raise ValueError("MB52 parsing returned no materials — check file format")
@@ -110,7 +135,10 @@ def load_stock(path: Path, log: logging.Logger) -> dict[str, float]:
     ).reset_index()
 
     stock = dict(zip(df_stock["Material"], df_stock["Unrestricted"]))
-    log.info(f"Stock loaded: {len(stock)} unique materials")
+    log.info(
+        f"Stock loaded: {len(stock)} unique materials "
+        f"(locations: {sorted(_STOCK_LOCATIONS)}, excluded qty: {skipped_qty:,.0f})"
+    )
     return stock
 
 
@@ -144,9 +172,28 @@ def load_components(path: Path, today: pd.Timestamp, log: logging.Logger) -> pd.
     df = df[df["To_Pick"] > 0].copy()
     df = df[df["Days_to_Start"] >= -30].copy()
     df = df[df["Material"] != ""].copy()
+
+    # Optional: exclude internally-manufactured components.
+    # V1 (make-to-stock) items are stocked and can genuinely be short.
+    # Non-V1 materials are produced on their own MO and are not picked
+    # from stock, so including them inflates the shortage count.
+    mrp_col = next(
+        (c for c in df.columns if c.lower().replace(" ", "") == "mrptype"),
+        None,
+    )
+    if mrp_col:
+        before_mrp = len(df)
+        df = df[df[mrp_col].astype(str).str.strip().str.upper() == "V1"].copy()
+        log.info(
+            f"MRP Type filter: kept {len(df)} V1 rows, "
+            f"excluded {before_mrp - len(df)} non-V1 (internally manufactured)"
+        )
+    else:
+        log.info("MRP Type column not in COOIS export — all component types included")
+
     log.info(
         f"Components: {before} raw → {len(df)} after filtering "
-        f"(shortages, recent jobs, valid materials)"
+        f"(shortages, recent jobs, valid materials, MRP type)"
     )
     log.info(f"Active MOs: {df['Order'].nunique()}")
 
@@ -221,6 +268,47 @@ def simulate_picks(
     return df_res
 
 
+def load_prs(path, log: logging.Logger) -> pd.DataFrame:
+    """Load ME5A purchase requisition export → open PR lines by material."""
+    df = pd.read_excel(path)
+    df.columns = df.columns.str.strip()
+    df["Material"] = df["Material"].astype(str).str.strip().replace("nan", "")
+    df = df[df["Material"] != ""].copy()
+
+    # PR document number — handle common SAP column name variants
+    pr_col = next(
+        (c for c in df.columns if "requisition" in c.lower() and "purchase" in c.lower()),
+        next((c for c in df.columns if c.lower() in ["purch. req.", "pr", "banfn"]), None)
+    )
+    df["PR_Doc"] = df[pr_col].astype(str).str.strip() if pr_col else ""
+
+    # Requested delivery date — handle common SAP column name variants
+    date_col = next(
+        (c for c in df.columns if "del. date" in c.lower() or "delivery date" in c.lower()),
+        next((c for c in df.columns if "date" in c.lower()), None)
+    )
+    df["PR_Date"] = pd.to_datetime(df[date_col], errors="coerce") if date_col else pd.NaT
+
+    # Quantity — handle common SAP column name variants
+    qty_col = next(
+        (c for c in df.columns if c.lower() in ["qty requested", "requisition qty", "quantity", "qty"]),
+        next((c for c in df.columns if "qty" in c.lower() or "quantity" in c.lower()), None)
+    )
+    df["PR_Qty"] = pd.to_numeric(df[qty_col], errors="coerce").fillna(0) if qty_col else 0
+
+    pr_summary = (
+        df.sort_values("PR_Date")
+        .groupby("Material", as_index=False)
+        .agg(
+            PR_Doc=("PR_Doc", "first"),
+            PR_Delivery_Date=("PR_Date", "min"),
+            PR_Open_Qty=("PR_Qty", "sum"),
+        )
+    )
+    log.info(f"PRs loaded: {len(df)} lines, {df['Material'].nunique()} unique materials")
+    return pr_summary
+
+
 def annotate_with_pos(
     df_comp: pd.DataFrame, df_pos: Optional[pd.DataFrame], log: logging.Logger
 ) -> pd.DataFrame:
@@ -243,6 +331,22 @@ def annotate_with_pos(
     with_po = (short_mask & df_out["PO_Delivery_Date"].notna()).sum()
     without_po = (short_mask & df_out["PO_Delivery_Date"].isna()).sum()
     log.info(f"Short components: {with_po} have open PO, {without_po} have no PO")
+    return df_out
+
+
+def annotate_with_prs(
+    df_comp: pd.DataFrame, df_prs: Optional[pd.DataFrame], log: logging.Logger
+) -> pd.DataFrame:
+    """Join open PR data to components. Safe to call with df_prs=None."""
+    empty_cols = {"PR_Doc": None, "PR_Delivery_Date": pd.NaT, "PR_Open_Qty": None}
+    if df_prs is None:
+        return df_comp.assign(**empty_cols)
+
+    df_out = df_comp.merge(df_prs, on="Material", how="left")
+    short_mask = df_out["Component_Status"] != "COVERED"
+    with_pr = (short_mask & df_out["PR_Delivery_Date"].notna()).sum()
+    without_pr = (short_mask & df_out["PR_Delivery_Date"].isna()).sum()
+    log.info(f"Short components: {with_pr} have open PR, {without_pr} have no PR")
     return df_out
 
 
