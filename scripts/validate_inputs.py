@@ -28,6 +28,12 @@ REQUIRED_COOIS_COLUMNS = [
     "Header Basic Finish Date",
 ]
 
+# Optional but used by build_readiness.py with graceful fallback if absent
+RECOMMENDED_COOIS_COLUMNS = ["Header SD order", "MRP Type"]
+
+# Procurement Type values the simulation recognises; others get treated as external
+KNOWN_PROC_TYPES = {"E", "F", "X", "U", ""}
+
 # MB52 is a hierarchical dump, not a flat table — we validate structure instead
 MB52_MIN_ROWS = 100  # Sanity check: should have hundreds at minimum
 
@@ -53,6 +59,14 @@ def validate_coois(path: Path, verbose: bool = False) -> dict:
             f"{path.name} missing required columns: {missing}\n"
             f"Found columns: {list(df.columns)}\n"
             f"Ensure you ran COOIS in Component view with full layout."
+        )
+
+    # Warn about optional columns used with graceful fallback
+    missing_recommended = [c for c in RECOMMENDED_COOIS_COLUMNS if c not in df.columns]
+    if missing_recommended:
+        print(
+            f"  ! COOIS optional columns not found: {missing_recommended} — "
+            f"simulation will use defaults (all components included, no SD order)"
         )
 
     # Row count check
@@ -83,6 +97,39 @@ def validate_coois(path: Path, verbose: bool = False) -> dict:
     # Required qty sanity
     if df["Requirement Quantity"].isna().all():
         raise ValidationError(f"{path.name} has no requirement quantities")
+
+    # Blank material codes — silently dropped by build_readiness.py; warn here
+    blank_mat = df["Material"].isna() | (df["Material"].astype(str).str.strip().isin(["", "nan"]))
+    n_blank_mat = int(blank_mat.sum())
+    if n_blank_mat > 0:
+        print(
+            f"  ! COOIS has {n_blank_mat} rows with blank Material codes — "
+            f"these will be excluded from the simulation"
+        )
+
+    # Duplicate Order entries with different Start Dates — can confuse sort order
+    if "Header Basic Start Date" in df.columns:
+        try:
+            df["_sd"] = pd.to_datetime(df["Header Basic Start Date"], errors="coerce")
+            order_dates = df.groupby("Order")["_sd"].nunique()
+            dup_orders = order_dates[order_dates > 1]
+            if len(dup_orders) > 0:
+                print(
+                    f"  ! {len(dup_orders)} order(s) appear with multiple Start Dates "
+                    f"({list(dup_orders.index[:5])}{'...' if len(dup_orders) > 5 else ''}) — "
+                    f"simulation will use the first date encountered per order"
+                )
+        except Exception:
+            pass
+
+    # Procurement Type values outside known set
+    proc_types_found = set(df["Procurement Type"].dropna().astype(str).str.strip().unique())
+    unknown_types = proc_types_found - KNOWN_PROC_TYPES
+    if unknown_types:
+        print(
+            f"  ! Unexpected Procurement Type values: {unknown_types} — "
+            f"these will be treated as external (purchased) parts"
+        )
 
     stats = {
         "file": path.name,
@@ -172,7 +219,21 @@ def validate_pos(path: Path, verbose: bool = False) -> dict:
         raise ValidationError(f"{path.name} is empty")
 
     has_material = df["Material"].notna() & (df["Material"].astype(str).str.strip() != "")
-    delivery_range = pd.to_datetime(df["Delivery Date"], errors="coerce").dropna()
+    delivery_dates = pd.to_datetime(df["Delivery Date"], errors="coerce")
+    delivery_range = delivery_dates.dropna()
+
+    if len(delivery_range) == 0:
+        raise ValidationError(
+            f"{path.name} has no parseable Delivery Date values — "
+            f"PO timing analysis will not work. Check the date format in the export."
+        )
+
+    n_missing_dates = int(delivery_dates.isna().sum())
+    if n_missing_dates > 0:
+        print(
+            f"  ! PO file: {n_missing_dates} rows have unparseable Delivery Date — "
+            f"Supply Risk column will show NO PO for those materials"
+        )
 
     stats = {
         "file": path.name,

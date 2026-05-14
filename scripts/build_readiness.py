@@ -91,9 +91,13 @@ def load_stock(path: Path, log: logging.Logger) -> dict[str, float]:
     df = pd.read_excel(path, header=None)
     log.debug(f"MB52 raw: {len(df)} rows")
 
+    parse_failures = [0]
+
     def to_num(x):
         try: return float(str(x).replace(",", "")) if pd.notna(x) else 0.0
-        except (ValueError, TypeError): return 0.0
+        except (ValueError, TypeError):
+            parse_failures[0] += 1
+            return 0.0
 
     mats = []
     skipped_qty = 0.0
@@ -125,6 +129,12 @@ def load_stock(path: Path, log: logging.Logger) -> dict[str, float]:
         else:
             i += 1
 
+    if parse_failures[0] > 0:
+        log.warning(
+            f"MB52: {parse_failures[0]} quantity cells could not be parsed — treated as zero. "
+            f"Check for text or special characters in the Unrestricted Stock column."
+        )
+
     if not mats:
         raise ValueError("MB52 parsing returned no materials — check file format")
 
@@ -154,7 +164,7 @@ def load_components(path: Path, today: pd.Timestamp, log: logging.Logger) -> pd.
     df["To_Pick"] = (df["Required"] - df["Withdrawn"]).clip(lower=0)
     df["Start_Date"] = pd.to_datetime(df["Header Basic Start Date"], errors="coerce")
     df["Finish_Date"] = pd.to_datetime(df["Header Basic Finish Date"], errors="coerce")
-    df["Days_to_Start"] = (df["Start_Date"] - today).dt.days
+    df["Days_to_Start"] = (df["Start_Date"].dt.normalize() - today).dt.days
     df["Proc_Type"] = df["Procurement Type"].fillna("").astype(str).str.strip()
     df["Job_Desc"] = df["Header Material Text"].astype(str)
 
@@ -235,7 +245,7 @@ def simulate_picks(
         short = need - allocated
 
         if allocated > 0:
-            remaining[mat] = available - allocated
+            remaining[mat] = round(available - allocated, 4)
 
         if short <= 0.001:
             status = "COVERED"
@@ -381,6 +391,16 @@ def aggregate_to_jobs(df_comp: pd.DataFrame, log: logging.Logger) -> pd.DataFram
         short_with_po = ext_short_rows["PO_Delivery_Date"].notna().sum() if "PO_Delivery_Date" in ext_short_rows.columns else 0
         earliest_po = ext_short_rows["PO_Delivery_Date"].min() if "PO_Delivery_Date" in ext_short_rows.columns else pd.NaT
 
+        start_dt = grp["Start_Date"].iloc[0]
+        if overall == "READY" or purchased_short == 0:
+            supply_risk = "-"
+        elif pd.isna(earliest_po) or pd.isna(start_dt):
+            supply_risk = "NO PO"
+        elif earliest_po <= start_dt:
+            supply_risk = "PO IN TIME"
+        else:
+            supply_risk = "PO LATE"
+
         return pd.Series({
             "Job_Desc": grp["Job_Desc"].iloc[0],
             "SD_Order": grp["SD_Order"].iloc[0],
@@ -396,9 +416,12 @@ def aggregate_to_jobs(df_comp: pd.DataFrame, log: logging.Logger) -> pd.DataFram
             "Readiness": overall,
             "Short_with_PO": int(short_with_po),
             "Earliest_PO_Due": earliest_po,
+            "Supply_Risk": supply_risk,
         })
 
-    df_jobs = df_comp.groupby("Order").apply(job_status, include_groups=False).reset_index()
+    _pd_ver = tuple(int(x) for x in pd.__version__.split(".")[:2])
+    _grp_kwargs = {"include_groups": False} if _pd_ver >= (2, 2) else {}
+    df_jobs = df_comp.groupby("Order").apply(job_status, **_grp_kwargs).reset_index()
     rank = {"NOT READY": 0, "PARTIAL": 1, "READY": 2}
     df_jobs["_rank"] = df_jobs["Readiness"].map(rank)
     df_jobs = df_jobs.sort_values(["_rank", "Start_Date"]).drop("_rank", axis=1).reset_index(drop=True)
@@ -458,9 +481,9 @@ def build_readiness_board(ws, df_jobs, today_str):
         "MO Number", "Job Description", "SD Order", "Start Date", "Days to Start",
         "Finish Date", "Total Parts", "Parts Ready", "Parts Short",
         "Purchased Short", "Internal Short", "READINESS",
-        "Short w/ PO", "Earliest PO Due",
+        "Short w/ PO", "Earliest PO Due", "Supply Risk", "Total Short Qty",
     ]
-    hdr_row(ws, 8, 14)
+    hdr_row(ws, 8, 16)
     for ci, h in enumerate(headers, 1):
         ws.cell(row=8, column=ci).value = h
     ws.row_dimensions[8].height = 30
@@ -495,12 +518,25 @@ def build_readiness_board(ws, df_jobs, today_str):
             value=row["Earliest_PO_Due"].date() if pd.notna(row["Earliest_PO_Due"]) else None,
         )
         c_po.number_format = "DD-MMM-YYYY"
+        ws.cell(row=ri, column=15, value=row.get("Supply_Risk", "-"))
+        ws.cell(row=ri, column=16, value=round(float(row["Total_Short_Qty"]), 2))
 
-        for ci in range(1, 15):
+        for ci in range(1, 17):
             c = ws.cell(row=ri, column=ci)
             c.border = bdr(); c.alignment = aln("center", "center"); c.font = fnt(size=10)
             if ci == 12:
                 c.fill = fill(bg); c.font = fnt(bold=True, color=tc, size=11)
+            elif ci == 15:
+                # Colour-code Supply Risk: PO LATE = red, PO IN TIME = green, NO PO = yellow
+                sr = row.get("Supply_Risk", "-")
+                if sr == "PO LATE":
+                    c.fill = fill(C["NOT_BG"]); c.font = fnt(bold=True, color=C["NOT_TXT"], size=10)
+                elif sr == "PO IN TIME":
+                    c.fill = fill(C["READY_BG"]); c.font = fnt(bold=True, color=C["READY_TXT"], size=10)
+                elif sr == "NO PO":
+                    c.fill = fill(C["PARTIAL_BG"]); c.font = fnt(bold=True, color=C["PARTIAL_TXT"], size=10)
+                elif ri % 2 == 0:
+                    c.fill = fill(C["ROW_ALT"])
             elif ri % 2 == 0:
                 c.fill = fill(C["ROW_ALT"])
         ws.row_dimensions[ri].height = 18
@@ -520,8 +556,8 @@ def build_readiness_board(ws, df_jobs, today_str):
             fill=fill(C["PARTIAL_BG"]), font=fnt(bold=True, color=C["PARTIAL_TXT"], size=10),
         ),
     )
-    ws.auto_filter.ref = f"A8:N{last}"
-    col_widths(ws, {1: 13, 2: 38, 3: 13, 4: 13, 5: 11, 6: 13, 7: 10, 8: 11, 9: 11, 10: 12, 11: 11, 12: 18, 13: 12, 14: 14})
+    ws.auto_filter.ref = f"A8:P{last}"
+    col_widths(ws, {1: 13, 2: 38, 3: 13, 4: 13, 5: 11, 6: 13, 7: 10, 8: 11, 9: 11, 10: 12, 11: 11, 12: 18, 13: 12, 14: 14, 15: 14, 16: 14})
 
 
 def build_component_detail(ws, df_comp, df_jobs, today_str):
@@ -724,7 +760,7 @@ def build_how_it_works(ws):
          False, 10, C["PARTIAL_BG"], C["PARTIAL_TXT"], 40),
         ("Stock = unrestricted only. QI, Transit, Blocked not included.",
          False, 10, C["PARTIAL_BG"], C["PARTIAL_TXT"], 24),
-        ("No PO/PR data. A 'short' job with PO arriving tomorrow is still flagged short.",
+        ("PO/PR data is optional. If y00_zmpo.xlsx or me5a_prs.xlsx are present, the 'Supply Risk' column shows whether the earliest PO arrives before the job's start date.",
          False, 10, C["PARTIAL_BG"], C["PARTIAL_TXT"], 24),
     ]
     for ri, item in enumerate(rows, 2):
@@ -743,11 +779,11 @@ def archive_inputs(inputs_dir: Path, log: logging.Logger) -> None:
     archive_dir.mkdir(exist_ok=True)
     date_str = datetime.now().strftime("%Y-%m-%d")
 
-    for name in ["coois_components.xlsx", "mb52_stock.xlsx", "y00_zmpo.xlsx"]:
+    for name in ["coois_components.xlsx", "mb52_stock.xlsx", "y00_zmpo.xlsx", "me5a_prs.xlsx"]:
         src = inputs_dir / name
         if src.exists():
             dst = archive_dir / f"{date_str}_{name}"
-            shutil.copy2(src, dst)
+            shutil.move(str(src), dst)
             log.info(f"Archived: {src.name} -> archive/{dst.name}")
 
 
@@ -784,6 +820,7 @@ def main():
     coois_path = inputs / "coois_components.xlsx"
     mb52_path = inputs / "mb52_stock.xlsx"
     po_path = inputs / "y00_zmpo.xlsx"
+    pr_path = inputs / "me5a_prs.xlsx"
 
     if not coois_path.exists():
         log.error(f"Missing: {coois_path}"); sys.exit(1)
@@ -800,13 +837,29 @@ def main():
     df_pos = None
     if po_path.exists():
         log.info("Loading PO data...")
-        df_pos = load_pos(po_path, log)
+        try:
+            df_pos = load_pos(po_path, log)
+        except KeyError as e:
+            log.warning(f"PO file missing column {e} — running without PO data")
+        except Exception as e:
+            log.warning(f"PO file could not be loaded ({e}) — running without PO data")
     else:
         log.info("No y00_zmpo.xlsx found — PO coverage columns will be blank")
+
+    df_prs = None
+    if pr_path.exists():
+        log.info("Loading PR data (ME5A)...")
+        try:
+            df_prs = load_prs(pr_path, log)
+        except Exception as e:
+            log.warning(f"PR file could not be loaded ({e}) — running without PR data")
+    else:
+        log.info("No me5a_prs.xlsx found — PR data not included (optional)")
 
     log.info("Running simulation...")
     df_comp = simulate_picks(df_comp_raw, stock, log)
     df_comp = annotate_with_pos(df_comp, df_pos, log)
+    df_comp = annotate_with_prs(df_comp, df_prs, log)
 
     log.info("Aggregating to job level...")
     df_jobs = aggregate_to_jobs(df_comp, log)
