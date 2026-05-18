@@ -8,6 +8,7 @@ import importlib.util
 import io
 import logging
 import os
+import pathlib
 from datetime import datetime
 
 import pandas as pd
@@ -69,6 +70,20 @@ with col4:
 with col5:
     ops_file = st.file_uploader("COOIS Operations (optional)", type=["xlsx"])
 
+_INPUTS_DIR = pathlib.Path(os.path.dirname(os.path.abspath(__file__))) / "inputs"
+_INPUTS_DIR.mkdir(exist_ok=True)
+for _uf, _fname in [
+    (coois_file, "coois_components.xlsx"),
+    (mb52_file, "mb52_stock.xlsx"),
+    (po_file, "y00_zmpo.xlsx"),
+    (pr_file, "me5a_prs.xlsx"),
+    (ops_file, "coois_operations.xlsx"),
+]:
+    if _uf is not None:
+        _uf.seek(0)
+        (_INPUTS_DIR / _fname).write_bytes(_uf.read())
+        _uf.seek(0)
+
 with st.expander("What should be in each file?"):
     t1, t2, t3, t4, t5 = st.columns(5)
     with t1:
@@ -114,7 +129,8 @@ with st.expander("What should be in each file?"):
             "- Delivery Date\n"
             "- Name\n\n"
             "**Tips:**\n"
-            "- Include open/outstanding POs only\n"
+            "- Export **all open POs** — do NOT filter by creation date or document date\n"
+            "- A PO created 6 months ago is still relevant if it has outstanding quantity\n"
             "- Enables PO coverage column on short parts\n"
             "- Leave blank if not available — the build still runs"
         )
@@ -126,7 +142,7 @@ with st.expander("What should be in each file?"):
             "- Material\n"
             "- Purchase Requisition\n\n"
             "**Tips:**\n"
-            "- Filter to your plant and open PRs only\n"
+            "- Export **all open PRs** — do NOT filter by creation date\n"
             "- Include the delivery date column in the layout\n"
             "- Enables **PR Only** status on shorts that have a requisition but no PO yet"
         )
@@ -366,10 +382,11 @@ if "df_jobs" in st.session_state:
             hits = df_jobs.copy()
 
         display = hits[[
-            "Order", "Job_Desc", "SD_Order", "Start_Date", "Days_to_Start",
+            "Order", "Job_Desc", "SD_Order", "Start_Date", "Finish_Date", "Days_to_Start",
             "Readiness", "Components_Ready", "Components_Short", "Purchased_Short",
         ]].copy()
         display["Start_Date"] = display["Start_Date"].dt.strftime("%d %b %Y")
+        display["Finish_Date"] = display["Finish_Date"].dt.strftime("%d %b %Y")
 
         def _highlight_readiness(row):
             bg = READINESS_BG.get(row["Readiness"], "")
@@ -390,6 +407,7 @@ if "df_jobs" in st.session_state:
                 "Job_Desc": st.column_config.TextColumn("Job Description"),
                 "SD_Order": st.column_config.TextColumn("SD Order", width="small"),
                 "Start_Date": st.column_config.TextColumn("Start Date", width="small"),
+                "Finish_Date": st.column_config.TextColumn("Required Del. Date", width="small"),
                 "Days_to_Start": st.column_config.NumberColumn("Days to Start", width="small"),
                 "Readiness": st.column_config.TextColumn("Status", width="small"),
                 "Components_Ready": st.column_config.NumberColumn("Parts Ready", width="small"),
