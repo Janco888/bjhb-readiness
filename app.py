@@ -586,9 +586,9 @@ if "df_jobs" in st.session_state:
             st.plotly_chart(fig_pie, use_container_width=True)
 
         with c_right:
-            st.markdown("##### Jobs by Start Week")
+            st.markdown("##### Jobs by Required Delivery Week")
             jobs_plot = df_jobs.copy()
-            jobs_plot["_Week"] = jobs_plot["Start_Date"].dt.to_period("W").dt.start_time
+            jobs_plot["_Week"] = jobs_plot["Finish_Date"].dt.to_period("W").dt.start_time
             jobs_plot["Week"] = jobs_plot["_Week"].dt.strftime("%d %b")
             _week_order = (
                 jobs_plot[["_Week", "Week"]].drop_duplicates()
