@@ -210,16 +210,44 @@ def load_components(path: Path, today: pd.Timestamp, log: logging.Logger) -> pd.
     return df
 
 
+def _find_col(df: pd.DataFrame, candidates: list[str]) -> Optional[str]:
+    """Return the first column name from candidates that exists in df (case-insensitive)."""
+    norm = {c.lower().replace(" ", "").replace("-", ""): c for c in df.columns}
+    for cand in candidates:
+        key = cand.lower().replace(" ", "").replace("-", "")
+        if key in norm:
+            return norm[key]
+    return None
+
+
 def load_pos(path: Path, log: logging.Logger) -> pd.DataFrame:
     """Load ZMPO purchase order export → open PO lines by material."""
     df = pd.read_excel(path)
+    df.columns = df.columns.str.strip()
     df["Material"] = df["Material"].astype(str).str.strip().replace("nan", "")
     df = df[df["Material"] != ""].copy()
-    df["Open_Qty"] = (df["PO-Quantity"] - df["GR-Quantity"]).clip(lower=0)
+
+    po_col = _find_col(df, ["PO-Quantity", "PO Quantity", "Order Quantity", "Qty"])
+    gr_col = _find_col(df, ["GR-Quantity", "GR Quantity", "GR Qty", "Goods Receipt Qty",
+                             "Already Delivered", "Qty Received", "Delivered Qty"])
+    del_col = _find_col(df, ["Delivery Date", "Deliv. Date", "Del. Date", "Planned Delivery Date"])
+    doc_col = _find_col(df, ["Purchasing Document", "PO Number", "PO Doc", "Document"])
+    name_col = _find_col(df, ["Name", "Vendor Name", "Supplier", "Name 1"])
+
+    if po_col is None:
+        raise KeyError("Cannot find PO quantity column in ZMPO file — expected 'PO-Quantity' or similar")
+
+    po_qty = pd.to_numeric(df[po_col], errors="coerce").fillna(0)
+    gr_qty = pd.to_numeric(df[gr_col], errors="coerce").fillna(0) if gr_col else pd.Series(0, index=df.index)
+
+    if gr_col is None:
+        log.warning("GR-Quantity column not found in ZMPO — treating all PO quantity as open")
+
+    df["Open_Qty"] = (po_qty - gr_qty).clip(lower=0)
     df = df[df["Open_Qty"] > 0].copy()
-    df["Delivery_Date"] = pd.to_datetime(df["Delivery Date"], errors="coerce")
-    df["PO_Doc"] = df["Purchasing Document"].astype(str)
-    df["Supplier_Name"] = df["Name"].astype(str).str[:30]
+    df["Delivery_Date"] = pd.to_datetime(df[del_col], errors="coerce") if del_col else pd.NaT
+    df["PO_Doc"] = df[doc_col].astype(str) if doc_col else ""
+    df["Supplier_Name"] = df[name_col].astype(str).str[:30] if name_col else ""
     log.info(f"POs loaded: {len(df)} open lines, {df['Material'].nunique()} unique materials")
     return df[["Material", "PO_Doc", "Delivery_Date", "Open_Qty", "Supplier_Name"]]
 
@@ -779,7 +807,7 @@ def archive_inputs(inputs_dir: Path, log: logging.Logger) -> None:
     archive_dir.mkdir(exist_ok=True)
     date_str = datetime.now().strftime("%Y-%m-%d")
 
-    for name in ["coois_components.xlsx", "mb52_stock.xlsx", "y00_zmpo.xlsx", "me5a_prs.xlsx"]:
+    for name in ["coois_components.xlsx", "mb52_stock.xlsx", "y00_zmpo.xlsx", "me5a_prs.xlsx", "me5a.xlsx"]:
         src = inputs_dir / name
         if src.exists():
             dst = archive_dir / f"{date_str}_{name}"
@@ -820,7 +848,7 @@ def main():
     coois_path = inputs / "coois_components.xlsx"
     mb52_path = inputs / "mb52_stock.xlsx"
     po_path = inputs / "y00_zmpo.xlsx"
-    pr_path = inputs / "me5a_prs.xlsx"
+    pr_path = inputs / "me5a_prs.xlsx" if (inputs / "me5a_prs.xlsx").exists() else inputs / "me5a.xlsx"
 
     if not coois_path.exists():
         log.error(f"Missing: {coois_path}"); sys.exit(1)

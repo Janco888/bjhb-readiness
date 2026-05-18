@@ -43,8 +43,7 @@ _COOIS_REQUIRED = [
     "Header Material Text", "Header Basic Start Date", "Header Basic Finish Date",
 ]
 _PO_REQUIRED = [
-    "Material", "Purchasing Document", "PO-Quantity",
-    "GR-Quantity", "Delivery Date", "Name",
+    "Material",
 ]
 _OPS_REQUIRED = ["Order", "Work Center", "Standard value 2"]
 _PR_REQUIRED = ["Material", "Purchase Requisition"]
