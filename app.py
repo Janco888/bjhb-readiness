@@ -658,6 +658,122 @@ if "df_jobs" in st.session_state:
 
         st.markdown("---")
 
+        # ── Next 2 weeks window ───────────────────────────────────────────────
+        st.markdown("##### Next 2 Weeks — Jobs Starting Soon")
+
+        two_weeks_out = today_ts + pd.Timedelta(days=14)
+        df_2wk = df_jobs[
+            (df_jobs["Start_Date"] >= today_ts) &
+            (df_jobs["Start_Date"] <= two_weeks_out)
+        ].sort_values("Start_Date").copy()
+
+        if df_2wk.empty:
+            st.info("No jobs scheduled to start in the next 14 days.")
+        else:
+            w_ready   = int((df_2wk["Readiness"] == "READY").sum())
+            w_partial = int((df_2wk["Readiness"] == "PARTIAL").sum())
+            w_not     = int((df_2wk["Readiness"] == "NOT READY").sum())
+
+            w1, w2, w3, w4 = st.columns(4)
+            w1.metric("Jobs in Window", len(df_2wk))
+            w2.metric("READY", w_ready)
+            w3.metric("PARTIAL", w_partial)
+            w4.metric("NOT READY", w_not)
+
+            _2wk_display_cols = ["Order", "Job_Desc", "SD_Order", "Start_Date", "Finish_Date",
+                                  "Readiness", "Components_Short", "Purchased_Short"]
+            if "Supply_Risk" in df_2wk.columns:
+                _2wk_display_cols.append("Supply_Risk")
+            _2wk_display_cols = [c for c in _2wk_display_cols if c in df_2wk.columns]
+            disp_2wk = df_2wk[_2wk_display_cols].copy()
+            disp_2wk["Start_Date"] = disp_2wk["Start_Date"].dt.strftime("%d %b %Y")
+            disp_2wk["Finish_Date"] = disp_2wk["Finish_Date"].dt.strftime("%d %b %Y")
+
+            st.dataframe(
+                disp_2wk.style.apply(_highlight_readiness, axis=1),
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Order": st.column_config.TextColumn("MO", width="small"),
+                    "Job_Desc": st.column_config.TextColumn("Job Description"),
+                    "SD_Order": st.column_config.TextColumn("SD Order", width="small"),
+                    "Start_Date": st.column_config.TextColumn("Start Date", width="small"),
+                    "Finish_Date": st.column_config.TextColumn("Required Del. Date", width="small"),
+                    "Readiness": st.column_config.TextColumn("Status", width="small"),
+                    "Components_Short": st.column_config.NumberColumn("Parts Short", width="small"),
+                    "Purchased_Short": st.column_config.NumberColumn("Purchased Short", width="small"),
+                    "Supply_Risk": st.column_config.TextColumn("Supply Risk", width="small"),
+                },
+            )
+
+            # ── Detailed shortage for 2-week jobs ─────────────────────────────
+            st.markdown("###### Shortage Detail — Next 2 Weeks")
+            orders_2wk = set(df_2wk["Order"].tolist())
+            short_2wk = df_comp[
+                df_comp["Order"].isin(orders_2wk) &
+                (df_comp["Component_Status"] == "SHORT")
+            ].copy()
+
+            if short_2wk.empty:
+                st.success("No shortages for jobs starting in the next 2 weeks.")
+            else:
+                # Merge in start date + job description for context
+                short_2wk = short_2wk.merge(
+                    df_2wk[["Order", "Job_Desc", "Start_Date"]],
+                    on="Order", how="left",
+                )
+                short_2wk = short_2wk.sort_values(["Start_Date", "Order", "Material"])
+
+                _s2_cols = ["Order", "Job_Desc", "Start_Date", "Material", "Material_Desc",
+                            "Proc_Type", "Short_Qty"]
+                _s2_cfg = {
+                    "Order": st.column_config.TextColumn("MO", width="small"),
+                    "Job_Desc": st.column_config.TextColumn("Job Description"),
+                    "Start_Date": st.column_config.DateColumn("Start Date", format="DD MMM YYYY", width="small"),
+                    "Material": st.column_config.TextColumn("Material", width="small"),
+                    "Material_Desc": st.column_config.TextColumn("Description"),
+                    "Proc_Type": st.column_config.TextColumn("Type", width="small"),
+                    "Short_Qty": st.column_config.NumberColumn("Short Qty", format="%.2f", width="small"),
+                }
+                if _has_po and "PO_Delivery_Date" in short_2wk.columns:
+                    short_2wk["PO_Due"] = (
+                        short_2wk["PO_Delivery_Date"].dt.strftime("%d %b %Y")
+                        .where(short_2wk["PO_Delivery_Date"].notna(), "—")
+                    )
+                    _s2_cols += ["PO_Due"]
+                    _s2_cfg["PO_Due"] = st.column_config.TextColumn("PO Due", width="small")
+                if _has_pr and "PR_Delivery_Date" in short_2wk.columns:
+                    short_2wk["PR_Due"] = (
+                        short_2wk["PR_Delivery_Date"].dt.strftime("%d %b %Y")
+                        .where(short_2wk["PR_Delivery_Date"].notna(), "—")
+                    )
+                    _s2_cols += ["PR_Due"]
+                    _s2_cfg["PR_Due"] = st.column_config.TextColumn("PR Due", width="small")
+
+                def _highlight_proc(row):
+                    result = []
+                    for col in row.index:
+                        if col == "PO_Due" and row.get("PO_Due", "—") not in ("—", ""):
+                            result.append("background-color: #C6EFCE")
+                        elif col == "PR_Due" and row.get("PR_Due", "—") not in ("—", ""):
+                            result.append("background-color: #FFEB9C")
+                        else:
+                            result.append("")
+                    return result
+
+                st.dataframe(
+                    short_2wk[_s2_cols].style.apply(_highlight_proc, axis=1),
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config=_s2_cfg,
+                )
+                st.caption(
+                    f"{len(short_2wk)} short line(s) across "
+                    f"{short_2wk['Order'].nunique()} job(s) starting in the next 14 days"
+                )
+
+        st.markdown("---")
+
         # ── Shortage report ───────────────────────────────────────────────────
         st.markdown("##### Shortage Report — All Jobs")
 
