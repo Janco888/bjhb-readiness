@@ -510,8 +510,9 @@ def build_readiness_board(ws, df_jobs, today_str):
         "Finish Date", "Total Parts", "Parts Ready", "Parts Short",
         "Purchased Short", "Internal Short", "READINESS",
         "Short w/ PO", "Earliest PO Due", "Supply Risk", "Total Short Qty",
+        "Sub-assy Risk",
     ]
-    hdr_row(ws, 8, 16)
+    hdr_row(ws, 8, 17)
     for ci, h in enumerate(headers, 1):
         ws.cell(row=8, column=ci).value = h
     ws.row_dimensions[8].height = 30
@@ -548,14 +549,14 @@ def build_readiness_board(ws, df_jobs, today_str):
         c_po.number_format = "DD-MMM-YYYY"
         ws.cell(row=ri, column=15, value=row.get("Supply_Risk", "-"))
         ws.cell(row=ri, column=16, value=round(float(row["Total_Short_Qty"]), 2))
+        ws.cell(row=ri, column=17, value=row.get("Subassy_Risk", "-"))
 
-        for ci in range(1, 17):
+        for ci in range(1, 18):
             c = ws.cell(row=ri, column=ci)
             c.border = bdr(); c.alignment = aln("center", "center"); c.font = fnt(size=10)
             if ci == 12:
                 c.fill = fill(bg); c.font = fnt(bold=True, color=tc, size=11)
             elif ci == 15:
-                # Colour-code Supply Risk: PO LATE = red, PO IN TIME = green, NO PO = yellow
                 sr = row.get("Supply_Risk", "-")
                 if sr == "PO LATE":
                     c.fill = fill(C["NOT_BG"]); c.font = fnt(bold=True, color=C["NOT_TXT"], size=10)
@@ -563,6 +564,18 @@ def build_readiness_board(ws, df_jobs, today_str):
                     c.fill = fill(C["READY_BG"]); c.font = fnt(bold=True, color=C["READY_TXT"], size=10)
                 elif sr == "NO PO":
                     c.fill = fill(C["PARTIAL_BG"]); c.font = fnt(bold=True, color=C["PARTIAL_TXT"], size=10)
+                elif ri % 2 == 0:
+                    c.fill = fill(C["ROW_ALT"])
+            elif ci == 17:
+                sar = row.get("Subassy_Risk", "-")
+                if isinstance(sar, str) and "NOT READY" in sar:
+                    c.fill = fill(C["NOT_BG"]); c.font = fnt(bold=True, color=C["NOT_TXT"], size=10)
+                elif isinstance(sar, str) and "PARTIAL" in sar:
+                    c.fill = fill(C["PARTIAL_BG"]); c.font = fnt(bold=True, color=C["PARTIAL_TXT"], size=10)
+                elif isinstance(sar, str) and sar == "Sub-assy READY":
+                    c.fill = fill(C["READY_BG"]); c.font = fnt(color=C["READY_TXT"], size=10)
+                elif isinstance(sar, str) and "UNKNOWN" in sar:
+                    c.fill = fill(C["PARTIAL_BG"]); c.font = fnt(color=C["PARTIAL_TXT"], size=10)
                 elif ri % 2 == 0:
                     c.fill = fill(C["ROW_ALT"])
             elif ri % 2 == 0:
@@ -584,8 +597,8 @@ def build_readiness_board(ws, df_jobs, today_str):
             fill=fill(C["PARTIAL_BG"]), font=fnt(bold=True, color=C["PARTIAL_TXT"], size=10),
         ),
     )
-    ws.auto_filter.ref = f"A8:P{last}"
-    col_widths(ws, {1: 13, 2: 38, 3: 13, 4: 13, 5: 11, 6: 13, 7: 10, 8: 11, 9: 11, 10: 12, 11: 11, 12: 18, 13: 12, 14: 14, 15: 14, 16: 14})
+    ws.auto_filter.ref = f"A8:Q{last}"
+    col_widths(ws, {1: 13, 2: 38, 3: 13, 4: 13, 5: 11, 6: 13, 7: 10, 8: 11, 9: 11, 10: 12, 11: 11, 12: 18, 13: 12, 14: 14, 15: 14, 16: 14, 17: 32})
 
 
 def build_component_detail(ws, df_comp, df_jobs, today_str):
@@ -800,6 +813,73 @@ def build_how_it_works(ws):
     col_widths(ws, {1: 120})
 
 
+# ─── COOIS HEADER ─────────────────────────────────────────────────────
+def load_coois_header(path_or_file, log: logging.Logger) -> pd.DataFrame:
+    """Load COOIS Header export and return sub-assembly link table.
+
+    Expects columns: Order, Superior Order, Material Description, Basic finish date.
+    Returns only rows where Superior Order is populated (actual sub-assembly links).
+    """
+    df = pd.read_excel(path_or_file)
+    df.columns = df.columns.str.strip()
+    df["Order"] = df["Order"].astype(str).str.strip().str.split(".").str[0]
+    df["Superior Order"] = df["Superior Order"].astype(str).str.strip().str.split(".").str[0]
+    df["Superior Order"] = df["Superior Order"].where(df["Superior Order"] != "nan", None)
+    if "Basic finish date" in df.columns:
+        df["Basic finish date"] = pd.to_datetime(df["Basic finish date"], errors="coerce")
+    linked = df[df["Superior Order"].notna()].copy()
+    log.info(f"COOIS Header: {len(df)} orders, {len(linked)} sub-assembly links")
+    return linked
+
+
+def annotate_subassembly_risk(
+    df_jobs: pd.DataFrame, df_header: Optional[pd.DataFrame], log: logging.Logger
+) -> pd.DataFrame:
+    """Add Subassy_Risk column to df_jobs.
+
+    For each parent MO that appears as a Superior Order in df_header, finds its
+    child sub-assembly MOs, looks up their Readiness in df_jobs, and sets
+    Subassy_Risk to the worst child status with a short description.
+    """
+    df_jobs = df_jobs.copy()
+    df_jobs["Subassy_Risk"] = "-"
+
+    if df_header is None or df_header.empty:
+        return df_jobs
+
+    readiness_map = df_jobs.set_index("Order")["Readiness"].to_dict()
+
+    child_map: dict = {}
+    for _, row in df_header.iterrows():
+        parent = str(row["Superior Order"]).strip()
+        child = str(row["Order"]).strip()
+        desc = str(row.get("Material Description", "")).strip()
+        child_map.setdefault(parent, []).append((child, desc))
+
+    priority = {"NOT READY": 0, "PARTIAL": 1, "UNKNOWN": 2, "READY": 3}
+    at_risk = 0
+
+    for idx, job_row in df_jobs.iterrows():
+        parent = str(job_row["Order"]).strip()
+        children = child_map.get(parent, [])
+        if not children:
+            continue
+        results = [(c_ord, c_desc, readiness_map.get(c_ord, "UNKNOWN"))
+                   for c_ord, c_desc in children]
+        worst = min(results, key=lambda x: priority.get(x[2], 99))
+        if worst[2] == "READY":
+            label = "Sub-assy READY"
+        elif worst[2] == "UNKNOWN":
+            label = f"UNKNOWN: {worst[1][:30]} ({worst[0]})"
+        else:
+            label = f"{worst[2]}: {worst[1][:30]} ({worst[0]})"
+            at_risk += 1
+        df_jobs.at[idx, "Subassy_Risk"] = label
+
+    log.info(f"Sub-assembly risk: {at_risk} parent job(s) have at-risk sub-assemblies")
+    return df_jobs
+
+
 # ─── ARCHIVE ──────────────────────────────────────────────────────────
 def archive_inputs(inputs_dir: Path, log: logging.Logger) -> None:
     """Move the processed inputs to archive/ with today's date prefix."""
@@ -849,6 +929,7 @@ def main():
     mb52_path = inputs / "mb52_stock.xlsx"
     po_path = inputs / "y00_zmpo.xlsx"
     pr_path = inputs / "me5a_prs.xlsx" if (inputs / "me5a_prs.xlsx").exists() else inputs / "me5a.xlsx"
+    header_path = inputs / "coois_header.xlsx"
 
     if not coois_path.exists():
         log.error(f"Missing: {coois_path}"); sys.exit(1)
@@ -884,6 +965,16 @@ def main():
     else:
         log.info("No me5a_prs.xlsx found — PR data not included (optional)")
 
+    df_header = None
+    if header_path.exists():
+        log.info("Loading COOIS Header data...")
+        try:
+            df_header = load_coois_header(header_path, log)
+        except Exception as e:
+            log.warning(f"COOIS Header file could not be loaded ({e}) — running without sub-assembly risk")
+    else:
+        log.info("No coois_header.xlsx found — sub-assembly risk column will be blank")
+
     log.info("Running simulation...")
     df_comp = simulate_picks(df_comp_raw, stock, log)
     df_comp = annotate_with_pos(df_comp, df_pos, log)
@@ -891,6 +982,7 @@ def main():
 
     log.info("Aggregating to job level...")
     df_jobs = aggregate_to_jobs(df_comp, log)
+    df_jobs = annotate_subassembly_risk(df_jobs, df_header, log)
 
     log.info("Building workbook...")
     wb = Workbook()

@@ -47,7 +47,7 @@ If validation fails:
 Run the main build script:
 
 ```bash
-python scripts/build_readiness.py $ARGUMENTS
+python scripts/build_readiness.py --no-archive $ARGUMENTS
 ```
 
 Watch the output for:
@@ -76,8 +76,6 @@ This week:
   🔴 NOT READY: X jobs blocked by missing parts
 
 Top priority: <brief comment on what matters most this week>
-
-Input files archived to inputs/archive/
 ```
 
 Then suggest one concrete next action based on the numbers — e.g. "Recommend reviewing the top 5 NOT READY jobs with the foreman" or "The 14 READY jobs can be released to the workshop today."

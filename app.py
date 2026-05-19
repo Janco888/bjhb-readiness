@@ -22,12 +22,14 @@ _br = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_br)  # type: ignore[union-attr]
 
 aggregate_to_jobs = _br.aggregate_to_jobs
+annotate_subassembly_risk = _br.annotate_subassembly_risk
 annotate_with_pos = _br.annotate_with_pos
 annotate_with_prs = _br.annotate_with_prs
 build_component_detail = _br.build_component_detail
 build_how_it_works = _br.build_how_it_works
 build_readiness_board = _br.build_readiness_board
 build_stock_ledger = _br.build_stock_ledger
+load_coois_header = _br.load_coois_header
 load_components = _br.load_components
 load_pos = _br.load_pos
 load_prs = _br.load_prs
@@ -51,23 +53,50 @@ _PR_REQUIRED = ["Material", "Purchase Requisition"]
 st.set_page_config(page_title="BJHB Job Readiness", layout="wide")
 
 st.title("BJHB Job Readiness Board")
-st.caption(
-    "Upload your SAP exports and click **Build Dashboard** to generate the weekly Excel report."
-)
 
-st.divider()
+# ─── SIDEBAR: file uploads + build button ────────────────────────────────────
+with st.sidebar:
+    st.header("SAP Exports")
+    st.markdown("**Required**")
+    coois_file = st.file_uploader("COOIS Components", type=["xlsx"], key="coois")
+    mb52_file = st.file_uploader("MB52 Stock", type=["xlsx"], key="mb52")
 
-col1, col2, col3, col4, col5 = st.columns(5)
-with col1:
-    coois_file = st.file_uploader("COOIS Components *", type=["xlsx"])
-with col2:
-    mb52_file = st.file_uploader("MB52 Stock *", type=["xlsx"])
-with col3:
-    po_file = st.file_uploader("ZMPO Purchase Orders (optional)", type=["xlsx"])
-with col4:
-    pr_file = st.file_uploader("ME5A Purchase Requisitions (optional)", type=["xlsx"])
-with col5:
-    ops_file = st.file_uploader("COOIS Operations (optional)", type=["xlsx"])
+    with st.expander("Optional files", expanded=True):
+        po_file = st.file_uploader("ZMPO Purchase Orders", type=["xlsx"], key="po",
+            help="Transaction ZMPO — open POs. Enables Supply Risk column.")
+        pr_file = st.file_uploader("ME5A Purchase Requisitions", type=["xlsx"], key="pr",
+            help="Transaction ME5A — open PRs. Enables PR Only status on shorts.")
+        ops_file = st.file_uploader("COOIS – Operations view", type=["xlsx"], key="ops",
+            help="COOIS list type = Operations. Needs Work Center + Standard value 2. Enables Production Load tab.")
+        header_file = st.file_uploader("COOIS – Header view", type=["xlsx"], key="header",
+            help="COOIS list type = Header. Needs Superior Order column. Enables Sub-assembly Risk column.")
+
+    st.divider()
+
+    ready_to_run = bool(coois_file and mb52_file)
+    _build_clicked = st.button("Build Dashboard", type="primary", disabled=not ready_to_run, use_container_width=True)
+
+    if not ready_to_run and "df_jobs" not in st.session_state:
+        st.caption("Upload COOIS Components and MB52 Stock to enable the build.")
+
+    with st.expander("What goes in each file?"):
+        st.markdown(
+            "**COOIS Components** *(required)*\n"
+            "Transaction: `COOIS` → Component view\n"
+            "Filter: Released orders, cover next 4–8 weeks\n\n"
+            "**MB52 Stock** *(required)*\n"
+            "Transaction: `MB52`, standard hierarchical layout\n\n"
+            "**ZMPO POs** *(optional)*\n"
+            "All open POs — enables Supply Risk column\n\n"
+            "**ME5A PRs** *(optional)*\n"
+            "All open PRs — enables PR Only status\n\n"
+            "**COOIS Operations** *(optional)*\n"
+            "Transaction: `COOIS` → Operation view\n"
+            "Enables Production Load tab\n\n"
+            "**COOIS Header** *(optional)*\n"
+            "Transaction: `COOIS` → Header view\n"
+            "Enables Sub-assembly Risk column"
+        )
 
 _INPUTS_DIR = pathlib.Path(os.path.dirname(os.path.abspath(__file__))) / "inputs"
 _INPUTS_DIR.mkdir(exist_ok=True)
@@ -77,93 +106,14 @@ for _uf, _fname in [
     (po_file, "y00_zmpo.xlsx"),
     (pr_file, "me5a_prs.xlsx"),
     (ops_file, "coois_operations.xlsx"),
+    (header_file, "coois_header.xlsx"),
 ]:
     if _uf is not None:
         _uf.seek(0)
         (_INPUTS_DIR / _fname).write_bytes(_uf.read())
         _uf.seek(0)
 
-with st.expander("What should be in each file?"):
-    t1, t2, t3, t4, t5 = st.columns(5)
-    with t1:
-        st.markdown(
-            "**COOIS Components** *(required)*\n\n"
-            "Transaction: `COOIS` → Component view\n\n"
-            "**Required columns:**\n"
-            "- Order\n"
-            "- Material & Material Description\n"
-            "- Requirement Quantity\n"
-            "- Quantity withdrawn\n"
-            "- Procurement Type\n"
-            "- Header Material Text\n"
-            "- Header Basic Start Date\n"
-            "- Header Basic Finish Date\n\n"
-            "**Recommended optional column:**\n"
-            "- **MRP Type** — when present, only V1 (make-to-stock) "
-            "components are included; internally manufactured parts "
-            "(non-V1) are excluded from the shortage analysis\n\n"
-            "**Tips:**\n"
-            "- Use the **Component** layout in COOIS\n"
-            "- Filter: **Released** orders only\n"
-            "- Date range: cover the next 4–8 weeks"
-        )
-    with t2:
-        st.markdown(
-            "**MB52 Stock** *(required)*\n\n"
-            "Transaction: `MB52`\n\n"
-            "**Tips:**\n"
-            "- Select your plant and all relevant storage locations\n"
-            "- Export in the **standard MB52 hierarchical layout** — do not reformat or sort\n"
-            "- Include all raw materials and bought-out parts\n"
-            "- A typical export has hundreds of rows minimum"
-        )
-    with t3:
-        st.markdown(
-            "**ZMPO Purchase Orders** *(optional)*\n\n"
-            "Transaction: `ZMPO` (custom report)\n\n"
-            "**Required columns:**\n"
-            "- Material\n"
-            "- Purchasing Document\n"
-            "- PO-Quantity & GR-Quantity\n"
-            "- Delivery Date\n"
-            "- Name\n\n"
-            "**Tips:**\n"
-            "- Export **all open POs** — do NOT filter by creation date or document date\n"
-            "- A PO created 6 months ago is still relevant if it has outstanding quantity\n"
-            "- Enables PO coverage column on short parts\n"
-            "- Leave blank if not available — the build still runs"
-        )
-    with t4:
-        st.markdown(
-            "**ME5A Purchase Requisitions** *(optional)*\n\n"
-            "Transaction: `ME5A`\n\n"
-            "**Required columns:**\n"
-            "- Material\n"
-            "- Purchase Requisition\n\n"
-            "**Tips:**\n"
-            "- Export **all open PRs** — do NOT filter by creation date\n"
-            "- Include the delivery date column in the layout\n"
-            "- Enables **PR Only** status on shorts that have a requisition but no PO yet"
-        )
-    with t5:
-        st.markdown(
-            "**COOIS Operations** *(optional)*\n\n"
-            "Transaction: `COOIS` → **Operation view**\n\n"
-            "**Required columns:**\n"
-            "- Order\n"
-            "- Work Center\n"
-            "- Standard value 2\n\n"
-            "**Tips:**\n"
-            "- In COOIS change the list type to **Operations**\n"
-            "- Use the same order/date filter as your Components export\n"
-            "- Enables the Production Load tab showing hours by work centre per week"
-        )
-
-st.divider()
-
-ready_to_run = bool(coois_file and mb52_file)
-
-if st.button("Build Dashboard", type="primary", disabled=not ready_to_run):
+if _build_clicked:
     log_lines = []
 
     class ListHandler(logging.Handler):
@@ -266,6 +216,7 @@ if st.button("Build Dashboard", type="primary", disabled=not ready_to_run):
             df_comp_raw = load_components(coois_file, today, log)
             df_pos = load_pos(po_file, log) if po_file else None
             df_prs = load_prs(pr_file, log) if pr_file else None
+            df_header = load_coois_header(header_file, log) if header_file else None
 
             if ops_file:
                 ops_file.seek(0)
@@ -300,6 +251,7 @@ if st.button("Build Dashboard", type="primary", disabled=not ready_to_run):
             df_comp = annotate_with_pos(df_comp, df_pos, log)
             df_comp = annotate_with_prs(df_comp, df_prs, log)
             df_jobs = aggregate_to_jobs(df_comp, log)
+            df_jobs = annotate_subassembly_risk(df_jobs, df_header, log)
 
         with st.spinner("Building workbook..."):
             wb = Workbook()
@@ -346,7 +298,8 @@ if st.button("Build Dashboard", type="primary", disabled=not ready_to_run):
             st.text("\n".join(log_lines))
 
 elif not ready_to_run:
-    st.info("Upload COOIS Components and MB52 Stock files above to enable the build.")
+    if "df_jobs" not in st.session_state:
+        st.info("Upload COOIS Components and MB52 Stock in the sidebar to enable the build.")
 
 
 # ─── POST-BUILD TABS ─────────────────────────────────────────────────────────
@@ -380,10 +333,14 @@ if "df_jobs" in st.session_state:
         else:
             hits = df_jobs.copy()
 
-        display = hits[[
+        _show_subassy = "Subassy_Risk" in hits.columns and (hits["Subassy_Risk"] != "-").any()
+        _job_cols = [
             "Order", "Job_Desc", "SD_Order", "Start_Date", "Finish_Date", "Days_to_Start",
             "Readiness", "Components_Ready", "Components_Short", "Purchased_Short",
-        ]].copy()
+        ]
+        if _show_subassy:
+            _job_cols.append("Subassy_Risk")
+        display = hits[_job_cols].copy()
         display["Start_Date"] = display["Start_Date"].dt.strftime("%d %b %Y")
         display["Finish_Date"] = display["Finish_Date"].dt.strftime("%d %b %Y")
 
@@ -412,6 +369,7 @@ if "df_jobs" in st.session_state:
                 "Components_Ready": st.column_config.NumberColumn("Parts Ready", width="small"),
                 "Components_Short": st.column_config.NumberColumn("Parts Short", width="small"),
                 "Purchased_Short": st.column_config.NumberColumn("Purchased Short", width="small"),
+                "Subassy_Risk": st.column_config.TextColumn("Sub-assy Risk", width="medium"),
             },
         )
         st.caption(f"{len(hits)} job(s) shown")
