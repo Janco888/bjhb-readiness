@@ -110,7 +110,13 @@ for _uf, _fname in [
 ]:
     if _uf is not None:
         _uf.seek(0)
-        (_INPUTS_DIR / _fname).write_bytes(_uf.read())
+        _dest = _INPUTS_DIR / _fname
+        try:
+            _dest.write_bytes(_uf.read())
+        except PermissionError:
+            if not _dest.exists():
+                raise
+            st.warning(f"Could not update {_fname} on disk (file locked) — using existing copy.")
         _uf.seek(0)
 
 if _build_clicked:
@@ -717,11 +723,6 @@ if "df_jobs" in st.session_state:
             if short_2wk.empty:
                 st.success("No shortages for jobs starting in the next 2 weeks.")
             else:
-                # Merge in start date + job description for context
-                short_2wk = short_2wk.merge(
-                    df_2wk[["Order", "Job_Desc", "Start_Date"]],
-                    on="Order", how="left",
-                )
                 short_2wk = short_2wk.sort_values(["Start_Date", "Order", "Material"])
 
                 _s2_cols = ["Order", "Job_Desc", "Start_Date", "Material", "Material_Desc",
