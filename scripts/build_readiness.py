@@ -221,7 +221,12 @@ def _find_col(df: pd.DataFrame, candidates: list[str]) -> Optional[str]:
 
 
 def load_pos(path: Path, log: logging.Logger) -> pd.DataFrame:
-    """Load ZMPO purchase order export → open PO lines by material."""
+    """Load ZMPO purchase order export → open PO lines by material.
+
+    Tolerates exports that are missing GR-Quantity or Delivery Date (e.g. PR-linked
+    exports from y00_zmp0 that omit those columns).  When GR-Quantity is absent we
+    treat the full PO-Quantity as open.  When Delivery Date is absent dates are NaT.
+    """
     df = pd.read_excel(path)
     df.columns = df.columns.str.strip()
     df["Material"] = df["Material"].astype(str).str.strip().replace("nan", "")
@@ -366,8 +371,8 @@ def annotate_with_pos(
     )
     df_out = df_comp.merge(po_summary, on="Material", how="left")
     short_mask = df_out["Component_Status"] != "COVERED"
-    with_po = (short_mask & df_out["PO_Delivery_Date"].notna()).sum()
-    without_po = (short_mask & df_out["PO_Delivery_Date"].isna()).sum()
+    with_po = (short_mask & df_out["PO_Doc"].notna()).sum()
+    without_po = (short_mask & df_out["PO_Doc"].isna()).sum()
     log.info(f"Short components: {with_po} have open PO, {without_po} have no PO")
     return df_out
 

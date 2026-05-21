@@ -310,7 +310,7 @@ if "df_jobs" in st.session_state:
 
     df_jobs: pd.DataFrame = st.session_state["df_jobs"]
     df_comp: pd.DataFrame = st.session_state["df_comp"]
-    _has_po = "PO_Delivery_Date" in df_comp.columns and df_comp["PO_Delivery_Date"].notna().any()
+    _has_po = "PO_Doc" in df_comp.columns and df_comp["PO_Doc"].notna().any()
     _has_pr = "PR_Delivery_Date" in df_comp.columns and df_comp["PR_Delivery_Date"].notna().any()
 
     tab_board, tab_analytics, tab_load = st.tabs(["📋 Job Board", "📊 Analytics & Shortage Report", "🏭 Production Load"])
@@ -431,7 +431,7 @@ if "df_jobs" in st.session_state:
             if _has_po or _has_pr:
                 po_dates = comps["PO_Delivery_Date"] if _has_po else pd.Series(pd.NaT, index=comps.index)
                 pr_dates = comps["PR_Delivery_Date"] if _has_pr else pd.Series(pd.NaT, index=comps.index)
-                has_po = po_dates.notna()
+                has_po = comps["PO_Doc"].notna() if _has_po else pd.Series(False, index=comps.index)
                 has_pr = pr_dates.notna()
 
                 proc_status = pd.Series("", index=comp_display.index)
