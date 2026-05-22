@@ -86,8 +86,16 @@ def title_row(ws, row, text, bg, tc, sz, h, n=12):
 _STOCK_LOCATIONS = {"0501", "J100", "J501", "05ES", "05ML", "0502"}
 
 
-def load_stock(path: Path, log: logging.Logger) -> dict[str, float]:
-    """Parse MB52 hierarchical format → {material: unrestricted_qty}."""
+def load_stock(
+    path: Path, log: logging.Logger
+) -> tuple[dict[str, float], dict[tuple[str, str], float]]:
+    """Parse MB52 hierarchical format.
+
+    Returns:
+        general_stock: {material: qty} — freely pooled unrestricted stock
+        sd_stock: {(material, sd_order): qty} — sales-order-earmarked stock (S=E rows),
+            allocated exclusively to the production order linked to that SD order
+    """
     df = pd.read_excel(path, header=None)
     log.debug(f"MB52 raw: {len(df)} rows")
 
@@ -100,6 +108,7 @@ def load_stock(path: Path, log: logging.Logger) -> dict[str, float]:
             return 0.0
 
     mats = []
+    sd_rows: list[dict] = []
     skipped_qty = 0.0
     i = 5
     while i < len(df):
@@ -119,7 +128,17 @@ def load_stock(path: Path, log: logging.Logger) -> dict[str, float]:
                 if sub_v0 and sub_v0 not in ["nan"]:
                     qty = to_num(sub[5])
                     if sub_v0 in _STOCK_LOCATIONS:
-                        total_qty += qty
+                        s_type = str(sub[1]).strip() if pd.notna(sub[1]) else ""
+                        if s_type == "E":
+                            # Sales Order Stock — ring-fence to the owning SD order number.
+                            # col[3] contains "<sd_order>/ <item>", e.g. "3050749707/ 10".
+                            special_num = str(sub[3]).strip() if pd.notna(sub[3]) else ""
+                            sd_order = special_num.split("/")[0].strip() if special_num else ""
+                            if sd_order and qty > 0:
+                                sd_rows.append({"Material": v0, "SD_Order": sd_order, "Qty": qty})
+                            # NOT added to the general pool
+                        else:
+                            total_qty += qty
                     else:
                         skipped_qty += qty
                 j += 1
@@ -135,21 +154,27 @@ def load_stock(path: Path, log: logging.Logger) -> dict[str, float]:
             f"Check for text or special characters in the Unrestricted Stock column."
         )
 
-    if not mats:
+    if not mats and not sd_rows:
         raise ValueError("MB52 parsing returned no materials — check file format")
 
-    df_stock = pd.DataFrame(mats)
+    df_stock = pd.DataFrame(mats) if mats else pd.DataFrame(columns=["Material", "Unrestricted"])
     df_stock["Material"] = df_stock["Material"].str.strip()
     df_stock = df_stock.groupby("Material").agg(
         Unrestricted=("Unrestricted", "sum")
     ).reset_index()
+    general_stock = dict(zip(df_stock["Material"], df_stock["Unrestricted"]))
 
-    stock = dict(zip(df_stock["Material"], df_stock["Unrestricted"]))
+    sd_stock: dict[tuple[str, str], float] = {}
+    for r in sd_rows:
+        key = (r["Material"], r["SD_Order"])
+        sd_stock[key] = sd_stock.get(key, 0) + r["Qty"]
+
     log.info(
-        f"Stock loaded: {len(stock)} unique materials "
+        f"Stock loaded: {len(general_stock)} materials in general pool, "
+        f"{len(sd_stock)} sales-order-allocated entries "
         f"(locations: {sorted(_STOCK_LOCATIONS)}, excluded qty: {skipped_qty:,.0f})"
     )
-    return stock
+    return general_stock, sd_stock
 
 
 def load_components(path: Path, today: pd.Timestamp, log: logging.Logger) -> pd.DataFrame:
@@ -259,26 +284,47 @@ def load_pos(path: Path, log: logging.Logger) -> pd.DataFrame:
 
 # ─── SIMULATION ──────────────────────────────────────────────────────────
 def simulate_picks(
-    df_comp: pd.DataFrame, stock: dict[str, float], log: logging.Logger
+    df_comp: pd.DataFrame,
+    stock: dict[str, float],
+    sd_stock: dict[tuple[str, str], float],
+    log: logging.Logger,
 ) -> pd.DataFrame:
     """
     Walk through MOs in start-date order, consuming stock as we go.
     Each MO's components either get fully picked (COVERED), partially picked
     (PARTIAL), or nothing (SHORT).
+
+    Sales-order-earmarked stock (S=E rows from MB52) is allocated only to the
+    MO that owns that SD order number; it never enters the shared pool.
     """
     df_sorted = df_comp.sort_values(["Start_Date", "Order"]).copy().reset_index(drop=True)
     remaining = stock.copy()
+    remaining_sd = dict(sd_stock)
     results = []
 
     for _, row in df_sorted.iterrows():
         mat = row["Material"]
         need = row["To_Pick"]
-        available = remaining.get(mat, 0)
+        sd_order = str(row.get("SD_Order", "")).strip()
+
+        # Available = general pool + this job's earmarked SD stock (if any)
+        general_avail = remaining.get(mat, 0)
+        sd_avail = remaining_sd.get((mat, sd_order), 0) if sd_order else 0
+        available = general_avail + sd_avail
+
         allocated = min(need, available)
         short = need - allocated
 
         if allocated > 0:
-            remaining[mat] = round(available - allocated, 4)
+            # Consume SD-earmarked stock first, then dip into general pool
+            sd_used = min(sd_avail, allocated)
+            general_used = allocated - sd_used
+            if sd_used > 0:
+                remaining_sd[(mat, sd_order)] = round(
+                    remaining_sd.get((mat, sd_order), 0) - sd_used, 4
+                )
+            if general_used > 0:
+                remaining[mat] = round(remaining.get(mat, 0) - general_used, 4)
 
         if short <= 0.001:
             status = "COVERED"
@@ -300,7 +346,7 @@ def simulate_picks(
             "Required": row["Required"],
             "Withdrawn": row["Withdrawn"],
             "To_Pick": need,
-            "Stock_At_Turn": available + allocated,
+            "Stock_At_Turn": available,
             "Allocated": allocated,
             "Short_Qty": short,
             "Component_Status": status,
@@ -945,7 +991,7 @@ def main():
     today_str = today.strftime("%d %b %Y")
 
     log.info("Loading data...")
-    stock = load_stock(mb52_path, log)
+    stock, sd_stock = load_stock(mb52_path, log)
     df_comp_raw = load_components(coois_path, today, log)
 
     df_pos = None
@@ -981,7 +1027,7 @@ def main():
         log.info("No coois_header.xlsx found — sub-assembly risk column will be blank")
 
     log.info("Running simulation...")
-    df_comp = simulate_picks(df_comp_raw, stock, log)
+    df_comp = simulate_picks(df_comp_raw, stock, sd_stock, log)
     df_comp = annotate_with_pos(df_comp, df_pos, log)
     df_comp = annotate_with_prs(df_comp, df_prs, log)
 

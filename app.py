@@ -218,7 +218,7 @@ if _build_clicked:
         with st.spinner("Loading data..."):
             today = pd.Timestamp.today().normalize()
             today_str = today.strftime("%d %b %Y")
-            stock = load_stock(mb52_file, log)
+            stock, sd_stock = load_stock(mb52_file, log)
             df_comp_raw = load_components(coois_file, today, log)
             df_pos = load_pos(po_file, log) if po_file else None
             df_prs = load_prs(pr_file, log) if pr_file else None
@@ -253,7 +253,7 @@ if _build_clicked:
             st.stop()
 
         with st.spinner("Running simulation..."):
-            df_comp = simulate_picks(df_comp_raw, stock, log)
+            df_comp = simulate_picks(df_comp_raw, stock, sd_stock, log)
             df_comp = annotate_with_pos(df_comp, df_pos, log)
             df_comp = annotate_with_prs(df_comp, df_prs, log)
             df_jobs = aggregate_to_jobs(df_comp, log)
