@@ -14,6 +14,7 @@ from datetime import datetime
 import pandas as pd
 import streamlit as st
 from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment
 
 _br_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts", "build_readiness.py")
 _spec = importlib.util.spec_from_file_location("build_readiness", _br_path)
@@ -97,6 +98,106 @@ with st.sidebar:
             "Transaction: `COOIS` → Header view\n"
             "Enables Sub-assembly Risk column"
         )
+
+def _build_2wk_excel(df_2wk: "pd.DataFrame", df_comp: "pd.DataFrame", today_str: str) -> bytes:
+    """Build a 2-sheet Excel: job summary + full component detail for next-2-weeks jobs."""
+    _HDR_FILL  = PatternFill("solid", fgColor="1F4E79")
+    _HDR_FONT  = Font(bold=True, color="FFFFFF", name="Arial", size=10)
+    _HDR_ALIGN = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+    _STATUS_FILL = {
+        "READY":     PatternFill("solid", fgColor="C6EFCE"),
+        "PARTIAL":   PatternFill("solid", fgColor="FFEB9C"),
+        "NOT READY": PatternFill("solid", fgColor="FFC7CE"),
+        "COVERED":   PatternFill("solid", fgColor="C6EFCE"),
+        "SHORT":     PatternFill("solid", fgColor="FFC7CE"),
+    }
+
+    def _style_sheet(ws, status_col_idx: int | None, status_map: dict):
+        for cell in ws[1]:
+            cell.font = _HDR_FONT
+            cell.fill = _HDR_FILL
+            cell.alignment = _HDR_ALIGN
+        ws.freeze_panes = "A2"
+        ws.row_dimensions[1].height = 30
+        if status_col_idx:
+            for row in ws.iter_rows(min_row=2):
+                status_val = str(row[status_col_idx - 1].value or "")
+                row_fill = status_map.get(status_val)
+                if row_fill:
+                    for cell in row:
+                        cell.fill = row_fill
+        for col in ws.columns:
+            max_len = max((len(str(cell.value or "")) for cell in col), default=8)
+            ws.column_dimensions[col[0].column_letter].width = min(max(max_len + 2, 10), 45)
+
+    orders_2wk = set(df_2wk["Order"].tolist())
+    comp_2wk = df_comp[df_comp["Order"].isin(orders_2wk)].copy()
+    comp_2wk = comp_2wk.sort_values(["Start_Date", "Order", "Component_Status", "Material"])
+
+    # ── Sheet 1: job summary ────────────────────────────────────────────────
+    _job_col_map = {
+        "Order": "MO Number", "Job_Desc": "Job Description", "SD_Order": "SD Order",
+        "Start_Date": "Start Date", "Finish_Date": "Required Del. Date",
+        "Readiness": "Status", "Components_Short": "Parts Short",
+        "Purchased_Short": "Purchased Short", "Total_Short_Qty": "Total Short Qty",
+        "Supply_Risk": "Supply Risk",
+    }
+    job_cols = [c for c in _job_col_map if c in df_2wk.columns]
+    jobs_out = df_2wk[job_cols].rename(columns=_job_col_map).copy()
+    for dc in ("Start Date", "Required Del. Date"):
+        if dc in jobs_out.columns:
+            jobs_out[dc] = pd.to_datetime(jobs_out[dc], errors="coerce").dt.strftime("%d %b %Y")
+
+    # ── Sheet 2: component detail ───────────────────────────────────────────
+    _comp_col_map = {
+        "Order": "MO Number", "Job_Desc": "Job Description", "SD_Order": "SD Order",
+        "Start_Date": "Start Date", "Finish_Date": "Required Del. Date",
+        "Material": "Material", "Material_Desc": "Description", "Proc_Type": "Type",
+        "Required": "Required Qty", "Withdrawn": "Withdrawn Qty",
+        "To_Pick": "To Pick", "Stock_At_Turn": "Stock Available",
+        "Allocated": "Allocated", "Short_Qty": "Short Qty",
+        "Component_Status": "Status",
+        "PO_Doc": "PO Number", "PO_Open_Qty": "PO Open Qty", "PO_Delivery_Date": "PO Delivery Date",
+        "PR_Doc": "PR Number", "PR_Open_Qty": "PR Open Qty", "PR_Delivery_Date": "PR Delivery Date",
+    }
+    comp_cols = [c for c in _comp_col_map if c in comp_2wk.columns]
+    comp_out = comp_2wk[comp_cols].rename(columns=_comp_col_map).copy()
+    for dc in ("Start Date", "Required Del. Date", "PO Delivery Date", "PR Delivery Date"):
+        if dc in comp_out.columns:
+            comp_out[dc] = pd.to_datetime(comp_out[dc], errors="coerce").dt.strftime("%d %b %Y").where(
+                pd.to_datetime(comp_out[dc], errors="coerce").notna(), ""
+            )
+
+    out = io.BytesIO()
+    with pd.ExcelWriter(out, engine="openpyxl") as writer:
+        jobs_out.to_excel(writer, sheet_name="Jobs", index=False)
+        comp_out.to_excel(writer, sheet_name="Components", index=False)
+
+        jobs_status_idx = (list(jobs_out.columns).index("Status") + 1) if "Status" in jobs_out.columns else None
+        comp_status_idx = (list(comp_out.columns).index("Status") + 1) if "Status" in comp_out.columns else None
+
+        _style_sheet(writer.sheets["Jobs"], jobs_status_idx, _STATUS_FILL)
+        _style_sheet(writer.sheets["Components"], comp_status_idx, _STATUS_FILL)
+
+        # Title rows above headers
+        for sheet_name, title in [
+            ("Jobs", f"Next 2 Weeks — Job Summary  ({today_str})"),
+            ("Components", f"Next 2 Weeks — Component Detail  ({today_str})"),
+        ]:
+            ws = writer.sheets[sheet_name]
+            ws.insert_rows(1)
+            ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=ws.max_column)
+            title_cell = ws.cell(row=1, column=1, value=title)
+            title_cell.font = Font(bold=True, color="FFFFFF", name="Arial", size=12)
+            title_cell.fill = PatternFill("solid", fgColor="1F4E79")
+            title_cell.alignment = Alignment(horizontal="left", vertical="center")
+            ws.row_dimensions[1].height = 20
+            ws.freeze_panes = "A3"
+
+    out.seek(0)
+    return out.getvalue()
+
 
 _INPUTS_DIR = pathlib.Path(os.path.dirname(os.path.abspath(__file__))) / "inputs"
 _INPUTS_DIR.mkdir(exist_ok=True)
@@ -710,6 +811,15 @@ if "df_jobs" in st.session_state:
                     "Purchased_Short": st.column_config.NumberColumn("Purchased Short", width="small"),
                     "Supply_Risk": st.column_config.TextColumn("Supply Risk", width="small"),
                 },
+            )
+
+            # ── Export button ──────────────────────────────────────────────────
+            _2wk_stamp = datetime.now().strftime("%Y-%m-%d")
+            st.download_button(
+                label="Export Next 2 Weeks to Excel",
+                data=_build_2wk_excel(df_2wk, df_comp, today_str),
+                file_name=f"Next_2_Weeks_{_2wk_stamp}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
 
             # ── Detailed shortage for 2-week jobs ─────────────────────────────
