@@ -316,9 +316,10 @@ def _add_2wk_sheets(wb, df_2wk: "pd.DataFrame", df_comp: "pd.DataFrame", today_s
                     for cell in ws[ws.max_row]:
                         cell.fill = row_fill
 
-        for col in ws.columns:
+        for col in ws.iter_cols():
+            col_letter = col[1].column_letter  # row 2 is the header, never merged
             max_len = max((len(str(cell.value or "")) for cell in col), default=8)
-            ws.column_dimensions[col[0].column_letter].width = min(max(max_len + 2, 10), 45)
+            ws.column_dimensions[col_letter].width = min(max(max_len + 2, 10), 45)
 
 
 for _uf, _fname in [
