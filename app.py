@@ -51,6 +51,12 @@ _PO_REQUIRED = [
 _OPS_REQUIRED = ["Order", "Work Center", "Standard value 2"]
 _PR_REQUIRED = ["Material", "Purchase Requisition"]
 
+_APP_DIR = pathlib.Path(os.path.dirname(os.path.abspath(__file__)))
+_INPUTS_DIR = _APP_DIR / "inputs"
+_INPUTS_DIR.mkdir(exist_ok=True)
+_OUTPUTS_DIR = _APP_DIR / "outputs"
+_OUTPUTS_DIR.mkdir(exist_ok=True)
+
 st.set_page_config(page_title="BJHB Job Readiness", layout="wide")
 
 st.title("BJHB Job Readiness Board")
@@ -79,6 +85,40 @@ with st.sidebar:
 
     if not ready_to_run and "df_jobs" not in st.session_state:
         st.caption("Upload COOIS Components and MB52 Stock to enable the build.")
+
+    with st.expander("Saved files", expanded=False):
+        st.markdown("**Inputs on disk**")
+        for _fname, _label in [
+            ("coois_components.xlsx", "COOIS Components"),
+            ("mb52_stock.xlsx", "MB52 Stock"),
+            ("y00_zmpo.xlsx", "ZMPO POs"),
+            ("me5a_prs.xlsx", "ME5A PRs"),
+            ("coois_operations.xlsx", "COOIS Operations"),
+            ("coois_header.xlsx", "COOIS Header"),
+        ]:
+            _f = _INPUTS_DIR / _fname
+            if _f.exists():
+                _mt = datetime.fromtimestamp(_f.stat().st_mtime).strftime("%d %b %Y %H:%M")
+                st.caption(f"✅ {_label} ({_mt})")
+            else:
+                st.caption(f"— {_label}")
+        st.markdown("**Outputs**")
+        _rb_files = sorted(_OUTPUTS_DIR.glob("Job_Readiness_Board_*.xlsx"), reverse=True)
+        _tw_files = sorted(_OUTPUTS_DIR.glob("Next_2_Weeks_*.xlsx"), reverse=True)
+        if _rb_files:
+            _f = _rb_files[0]
+            st.download_button(f"📥 {_f.name}", data=_f.read_bytes(), file_name=_f.name,
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                               key="dl_rb_sidebar")
+        else:
+            st.caption("— No readiness board yet")
+        if _tw_files:
+            _f = _tw_files[0]
+            st.download_button(f"📥 {_f.name}", data=_f.read_bytes(), file_name=_f.name,
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                               key="dl_tw_sidebar")
+        else:
+            st.caption("— No 2-week report yet")
 
     with st.expander("What goes in each file?"):
         st.markdown(
@@ -199,8 +239,6 @@ def _build_2wk_excel(df_2wk: "pd.DataFrame", df_comp: "pd.DataFrame", today_str:
     return out.getvalue()
 
 
-_INPUTS_DIR = pathlib.Path(os.path.dirname(os.path.abspath(__file__))) / "inputs"
-_INPUTS_DIR.mkdir(exist_ok=True)
 for _uf, _fname in [
     (coois_file, "coois_components.xlsx"),
     (mb52_file, "mb52_stock.xlsx"),
@@ -376,6 +414,28 @@ if _build_clicked:
         st.session_state["df_comp"] = df_comp
         st.session_state["df_ops"] = df_ops
 
+        # Build 2-week report alongside the main dashboard
+        _two_weeks_out = today + pd.Timedelta(days=14)
+        df_2wk_built = df_jobs[
+            (df_jobs["Start_Date"] >= today) &
+            (df_jobs["Start_Date"] <= _two_weeks_out)
+        ].sort_values("Start_Date").copy()
+        st.session_state["df_2wk"] = df_2wk_built
+
+        stamp = datetime.now().strftime("%Y-%m-%d")
+        readiness_bytes = out.getvalue()
+        twowk_bytes = _build_2wk_excel(df_2wk_built, df_comp, today_str)
+        st.session_state["twowk_bytes"] = twowk_bytes
+        st.session_state["twowk_fname"] = f"Next_2_Weeks_{stamp}.xlsx"
+
+        # Save to outputs/ — replace any files from the previous build
+        for _old in _OUTPUTS_DIR.glob("Job_Readiness_Board_*.xlsx"):
+            _old.unlink(missing_ok=True)
+        for _old in _OUTPUTS_DIR.glob("Next_2_Weeks_*.xlsx"):
+            _old.unlink(missing_ok=True)
+        (_OUTPUTS_DIR / f"Job_Readiness_Board_{stamp}.xlsx").write_bytes(readiness_bytes)
+        (_OUTPUTS_DIR / f"Next_2_Weeks_{stamp}.xlsx").write_bytes(twowk_bytes)
+
         n_ready = int((df_jobs["Readiness"] == "READY").sum())
         n_partial = int((df_jobs["Readiness"] == "PARTIAL").sum())
         n_not = int((df_jobs["Readiness"] == "NOT READY").sum())
@@ -388,14 +448,23 @@ if _build_clicked:
         c3.metric("NOT READY", n_not, help="Blocked — do not release")
         c4.metric("Total Jobs", len(df_jobs))
 
-        stamp = datetime.now().strftime("%Y-%m-%d")
-        st.download_button(
-            label="Download Excel Dashboard",
-            data=out,
-            file_name=f"Job_Readiness_Board_{stamp}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            type="primary",
-        )
+        dl_left, dl_right = st.columns(2)
+        with dl_left:
+            st.download_button(
+                label="📥 Full Readiness Board",
+                data=readiness_bytes,
+                file_name=f"Job_Readiness_Board_{stamp}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                type="primary",
+            )
+        with dl_right:
+            st.download_button(
+                label="📥 Next 2 Weeks Report",
+                data=twowk_bytes,
+                file_name=f"Next_2_Weeks_{stamp}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                type="primary",
+            )
 
     except Exception as e:
         st.error(f"Build failed: {e}")
@@ -768,11 +837,14 @@ if "df_jobs" in st.session_state:
         # ── Next 2 weeks window ───────────────────────────────────────────────
         st.markdown("##### Next 2 Weeks — Jobs Starting Soon")
 
-        two_weeks_out = today_ts + pd.Timedelta(days=14)
-        df_2wk = df_jobs[
-            (df_jobs["Start_Date"] >= today_ts) &
-            (df_jobs["Start_Date"] <= two_weeks_out)
-        ].sort_values("Start_Date").copy()
+        if "df_2wk" in st.session_state:
+            df_2wk = st.session_state["df_2wk"]
+        else:
+            two_weeks_out = today_ts + pd.Timedelta(days=14)
+            df_2wk = df_jobs[
+                (df_jobs["Start_Date"] >= today_ts) &
+                (df_jobs["Start_Date"] <= two_weeks_out)
+            ].sort_values("Start_Date").copy()
 
         if df_2wk.empty:
             st.info("No jobs scheduled to start in the next 14 days.")
@@ -814,11 +886,17 @@ if "df_jobs" in st.session_state:
             )
 
             # ── Export button ──────────────────────────────────────────────────
-            _2wk_stamp = datetime.now().strftime("%Y-%m-%d")
+            if "twowk_bytes" in st.session_state:
+                _tw_data = st.session_state["twowk_bytes"]
+                _tw_name = st.session_state["twowk_fname"]
+            else:
+                _2wk_stamp = datetime.now().strftime("%Y-%m-%d")
+                _tw_data = _build_2wk_excel(df_2wk, df_comp, today_str)
+                _tw_name = f"Next_2_Weeks_{_2wk_stamp}.xlsx"
             st.download_button(
                 label="Export Next 2 Weeks to Excel",
-                data=_build_2wk_excel(df_2wk, df_comp, today_str),
-                file_name=f"Next_2_Weeks_{_2wk_stamp}.xlsx",
+                data=_tw_data,
+                file_name=_tw_name,
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
 
