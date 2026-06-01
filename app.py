@@ -104,7 +104,6 @@ with st.sidebar:
                 st.caption(f"— {_label}")
         st.markdown("**Outputs**")
         _rb_files = sorted(_OUTPUTS_DIR.glob("Job_Readiness_Board_*.xlsx"), reverse=True)
-        _tw_files = sorted(_OUTPUTS_DIR.glob("Next_2_Weeks_*.xlsx"), reverse=True)
         if _rb_files:
             _f = _rb_files[0]
             st.download_button(f"📥 {_f.name}", data=_f.read_bytes(), file_name=_f.name,
@@ -112,13 +111,6 @@ with st.sidebar:
                                key="dl_rb_sidebar")
         else:
             st.caption("— No readiness board yet")
-        if _tw_files:
-            _f = _tw_files[0]
-            st.download_button(f"📥 {_f.name}", data=_f.read_bytes(), file_name=_f.name,
-                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                               key="dl_tw_sidebar")
-        else:
-            st.caption("— No 2-week report yet")
 
     with st.expander("What goes in each file?"):
         st.markdown(
@@ -237,6 +229,96 @@ def _build_2wk_excel(df_2wk: "pd.DataFrame", df_comp: "pd.DataFrame", today_str:
 
     out.seek(0)
     return out.getvalue()
+
+
+def _add_2wk_sheets(wb, df_2wk: "pd.DataFrame", df_comp: "pd.DataFrame", today_str: str) -> None:
+    """Add NEXT_2_WEEKS and NEXT_2_WEEKS_COMP sheets to an existing openpyxl workbook."""
+    _HDR_FILL  = PatternFill("solid", fgColor="1F4E79")
+    _HDR_FONT  = Font(bold=True, color="FFFFFF", name="Arial", size=10)
+    _HDR_ALIGN = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    _STATUS_FILL = {
+        "READY":     PatternFill("solid", fgColor="C6EFCE"),
+        "PARTIAL":   PatternFill("solid", fgColor="FFEB9C"),
+        "NOT READY": PatternFill("solid", fgColor="FFC7CE"),
+        "COVERED":   PatternFill("solid", fgColor="C6EFCE"),
+        "SHORT":     PatternFill("solid", fgColor="FFC7CE"),
+    }
+
+    orders_2wk = set(df_2wk["Order"].tolist())
+    comp_2wk = df_comp[df_comp["Order"].isin(orders_2wk)].copy()
+    comp_2wk = comp_2wk.sort_values(["Start_Date", "Order", "Component_Status", "Material"])
+
+    _job_col_map = {
+        "Order": "MO Number", "Job_Desc": "Job Description", "SD_Order": "SD Order",
+        "Start_Date": "Start Date", "Finish_Date": "Required Del. Date",
+        "Readiness": "Status", "Components_Short": "Parts Short",
+        "Purchased_Short": "Purchased Short", "Total_Short_Qty": "Total Short Qty",
+        "Supply_Risk": "Supply Risk",
+    }
+    job_cols = [c for c in _job_col_map if c in df_2wk.columns]
+    jobs_out = df_2wk[job_cols].rename(columns=_job_col_map).copy()
+    for dc in ("Start Date", "Required Del. Date"):
+        if dc in jobs_out.columns:
+            jobs_out[dc] = pd.to_datetime(jobs_out[dc], errors="coerce").dt.strftime("%d %b %Y")
+
+    _comp_col_map = {
+        "Order": "MO Number", "Job_Desc": "Job Description", "SD_Order": "SD Order",
+        "Start_Date": "Start Date", "Finish_Date": "Required Del. Date",
+        "Material": "Material", "Material_Desc": "Description", "Proc_Type": "Type",
+        "Required": "Required Qty", "Withdrawn": "Withdrawn Qty",
+        "To_Pick": "To Pick", "Stock_At_Turn": "Stock Available",
+        "Allocated": "Allocated", "Short_Qty": "Short Qty",
+        "Component_Status": "Status",
+        "PO_Doc": "PO Number", "PO_Open_Qty": "PO Open Qty", "PO_Delivery_Date": "PO Delivery Date",
+        "PR_Doc": "PR Number", "PR_Open_Qty": "PR Open Qty", "PR_Delivery_Date": "PR Delivery Date",
+    }
+    comp_cols = [c for c in _comp_col_map if c in comp_2wk.columns]
+    comp_out = comp_2wk[comp_cols].rename(columns=_comp_col_map).copy()
+    for dc in ("Start Date", "Required Del. Date", "PO Delivery Date", "PR Delivery Date"):
+        if dc in comp_out.columns:
+            comp_out[dc] = (
+                pd.to_datetime(comp_out[dc], errors="coerce")
+                .dt.strftime("%d %b %Y")
+                .where(pd.to_datetime(comp_out[dc], errors="coerce").notna(), "")
+            )
+
+    for sheet_name, df_out, title in [
+        ("NEXT_2_WEEKS",      jobs_out, f"Next 2 Weeks — Job Summary  ({today_str})"),
+        ("NEXT_2_WEEKS_COMP", comp_out, f"Next 2 Weeks — Component Detail  ({today_str})"),
+    ]:
+        ws = wb.create_sheet(sheet_name)
+        df_clean = df_out.fillna("")
+        cols = list(df_clean.columns)
+        status_idx = cols.index("Status") if "Status" in cols else None
+
+        ws.append([title] + [""] * (len(cols) - 1))
+        ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(cols))
+        tc = ws.cell(row=1, column=1)
+        tc.font = Font(bold=True, color="FFFFFF", name="Arial", size=12)
+        tc.fill = PatternFill("solid", fgColor="1F4E79")
+        tc.alignment = Alignment(horizontal="left", vertical="center")
+        ws.row_dimensions[1].height = 20
+
+        ws.append(cols)
+        for cell in ws[2]:
+            cell.font = _HDR_FONT
+            cell.fill = _HDR_FILL
+            cell.alignment = _HDR_ALIGN
+        ws.row_dimensions[2].height = 30
+        ws.freeze_panes = "A3"
+
+        for row_vals in df_clean.itertuples(index=False, name=None):
+            ws.append(list(row_vals))
+            if status_idx is not None:
+                status_val = str(row_vals[status_idx])
+                row_fill = _STATUS_FILL.get(status_val)
+                if row_fill:
+                    for cell in ws[ws.max_row]:
+                        cell.fill = row_fill
+
+        for col in ws.columns:
+            max_len = max((len(str(cell.value or "")) for cell in col), default=8)
+            ws.column_dimensions[col[0].column_letter].width = min(max(max_len + 2, 10), 45)
 
 
 for _uf, _fname in [
@@ -398,6 +480,14 @@ if _build_clicked:
             df_jobs = aggregate_to_jobs(df_comp, log)
             df_jobs = annotate_subassembly_risk(df_jobs, df_header, log)
 
+        # Compute 2-week window before building workbook so it can be added as a sheet
+        _two_weeks_out = today + pd.Timedelta(days=14)
+        df_2wk_built = df_jobs[
+            (df_jobs["Start_Date"] >= today) &
+            (df_jobs["Start_Date"] <= _two_weeks_out)
+        ].sort_values("Start_Date").copy()
+        st.session_state["df_2wk"] = df_2wk_built
+
         with st.spinner("Building workbook..."):
             wb = Workbook()
             ws1 = wb.active
@@ -405,6 +495,7 @@ if _build_clicked:
             build_readiness_board(ws1, df_jobs, today_str)
             build_component_detail(wb.create_sheet("COMPONENT_DETAIL"), df_comp, df_jobs, today_str)
             build_stock_ledger(wb.create_sheet("STOCK_LEDGER"), df_comp, stock, today_str)
+            _add_2wk_sheets(wb, df_2wk_built, df_comp, today_str)
             build_how_it_works(wb.create_sheet("HOW_IT_WORKS"))
             out = io.BytesIO()
             wb.save(out)
@@ -414,27 +505,13 @@ if _build_clicked:
         st.session_state["df_comp"] = df_comp
         st.session_state["df_ops"] = df_ops
 
-        # Build 2-week report alongside the main dashboard
-        _two_weeks_out = today + pd.Timedelta(days=14)
-        df_2wk_built = df_jobs[
-            (df_jobs["Start_Date"] >= today) &
-            (df_jobs["Start_Date"] <= _two_weeks_out)
-        ].sort_values("Start_Date").copy()
-        st.session_state["df_2wk"] = df_2wk_built
-
         stamp = datetime.now().strftime("%Y-%m-%d")
         readiness_bytes = out.getvalue()
-        twowk_bytes = _build_2wk_excel(df_2wk_built, df_comp, today_str)
-        st.session_state["twowk_bytes"] = twowk_bytes
-        st.session_state["twowk_fname"] = f"Next_2_Weeks_{stamp}.xlsx"
 
-        # Save to outputs/ — replace any files from the previous build
+        # Save to outputs/ — replace any file from the previous build
         for _old in _OUTPUTS_DIR.glob("Job_Readiness_Board_*.xlsx"):
             _old.unlink(missing_ok=True)
-        for _old in _OUTPUTS_DIR.glob("Next_2_Weeks_*.xlsx"):
-            _old.unlink(missing_ok=True)
         (_OUTPUTS_DIR / f"Job_Readiness_Board_{stamp}.xlsx").write_bytes(readiness_bytes)
-        (_OUTPUTS_DIR / f"Next_2_Weeks_{stamp}.xlsx").write_bytes(twowk_bytes)
 
         n_ready = int((df_jobs["Readiness"] == "READY").sum())
         n_partial = int((df_jobs["Readiness"] == "PARTIAL").sum())
@@ -448,23 +525,14 @@ if _build_clicked:
         c3.metric("NOT READY", n_not, help="Blocked — do not release")
         c4.metric("Total Jobs", len(df_jobs))
 
-        dl_left, dl_right = st.columns(2)
-        with dl_left:
-            st.download_button(
-                label="📥 Full Readiness Board",
-                data=readiness_bytes,
-                file_name=f"Job_Readiness_Board_{stamp}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                type="primary",
-            )
-        with dl_right:
-            st.download_button(
-                label="📥 Next 2 Weeks Report",
-                data=twowk_bytes,
-                file_name=f"Next_2_Weeks_{stamp}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                type="primary",
-            )
+        st.download_button(
+            label="📥 Download Readiness Board",
+            data=readiness_bytes,
+            file_name=f"Job_Readiness_Board_{stamp}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            type="primary",
+            use_container_width=True,
+        )
 
     except Exception as e:
         st.error(f"Build failed: {e}")
