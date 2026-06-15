@@ -34,6 +34,8 @@ Click `Settings → Layout → Change`. Ensure these columns are in the layout:
 - [ ] Header Basic Start Date
 - [ ] Header Basic Finish Date
 - [ ] Header SD order
+- [ ] MRP Type *(optional — when present, the pipeline keeps only V1 items, automatically excluding phantom assemblies and internally-manufactured components)*
+- [ ] Phantom item *(optional — when present, rows flagged X are excluded before the simulation runs)*
 
 **Execute** (F8)
 

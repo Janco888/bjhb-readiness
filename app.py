@@ -40,16 +40,25 @@ simulate_picks = _br.simulate_picks
 READINESS_BG = {"READY": "#C6EFCE", "PARTIAL": "#FFEB9C", "NOT READY": "#FFC7CE"}
 COMPONENT_BG = {"COVERED": "#C6EFCE", "PARTIAL": "#FFEB9C", "SHORT": "#FFC7CE"}
 
-_COOIS_REQUIRED = [
+_COOIS_REQUIRED_EXACT = [
     "Order", "Material", "Material Description",
-    "Requirement Quantity", "Quantity withdrawn", "Procurement Type",
-    "Header Material Text", "Header Basic Start Date", "Header Basic Finish Date",
+    "Procurement Type", "Header Material Text",
+    "Header Basic Start Date", "Header Basic Finish Date",
 ]
+# These two use flexible matching (SAP exports use various names)
+_COOIS_REQ_QTY_VARIANTS = ["Requirement Quantity", "Reqmt Quantity", "Requirements Qty", "Requirement Qty", "Reqmt qty"]
+_COOIS_WITH_QTY_VARIANTS = ["Quantity withdrawn", "Qty withdrawn", "Withdrawn Quantity", "Withdrawn Qty", "Qty Withdrawn"]
 _PO_REQUIRED = [
     "Material",
 ]
 _OPS_REQUIRED = ["Order", "Work Center", "Standard value 2"]
 _PR_REQUIRED = ["Material", "Purchase Requisition"]
+
+
+def _col_exists_flexible(cols, variants: list[str]) -> bool:
+    """Case-insensitive, whitespace-stripped column lookup."""
+    norm = {c.lower().replace(" ", "").replace("-", "") for c in cols}
+    return any(v.lower().replace(" ", "").replace("-", "") in norm for v in variants)
 
 _APP_DIR = pathlib.Path(os.path.dirname(os.path.abspath(__file__)))
 _INPUTS_DIR = _APP_DIR / "inputs"
@@ -363,12 +372,19 @@ if _build_clicked:
         coois_file.seek(0)
         try:
             _df_coois_chk = pd.read_excel(coois_file)
-            missing = [c for c in _COOIS_REQUIRED if c not in _df_coois_chk.columns]
+            _df_coois_chk.columns = _df_coois_chk.columns.str.strip()
+            _coois_cols = set(_df_coois_chk.columns.tolist())
+            missing = [c for c in _COOIS_REQUIRED_EXACT if c not in _coois_cols]
+            if not _col_exists_flexible(_coois_cols, _COOIS_REQ_QTY_VARIANTS):
+                missing.append("Requirement Quantity")
+            if not _col_exists_flexible(_coois_cols, _COOIS_WITH_QTY_VARIANTS):
+                missing.append("Quantity withdrawn")
             if missing:
                 val_errors.append(
                     "**COOIS file is missing required columns:**\n\n"
                     + "\n".join(f"- `{c}`" for c in missing)
-                    + "\n\nMake sure you exported from COOIS in **Component view** with the full layout."
+                    + f"\n\nColumns found: {', '.join(sorted(_coois_cols))}\n\n"
+                    + "Make sure you exported from COOIS in **Component view** with the full layout."
                 )
             elif len(_df_coois_chk) == 0:
                 val_errors.append("**COOIS file is empty.** Check your SAP filter settings.")
@@ -405,12 +421,24 @@ if _build_clicked:
             try:
                 _df_pr_chk = pd.read_excel(pr_file)
                 _df_pr_chk.columns = _df_pr_chk.columns.str.strip()
-                missing_pr = [c for c in _PR_REQUIRED if c not in _df_pr_chk.columns]
-                if missing_pr:
+                _pr_missing = []
+                if "Material" not in _df_pr_chk.columns:
+                    _pr_missing.append("Material")
+                # Accept any column with both "purchase" and "requisition" in the name,
+                # or common SAP short forms — matches the flexible logic in load_prs()
+                _has_pr_col = any(
+                    ("requisition" in c.lower() and "purchase" in c.lower())
+                    or c.lower() in ("purch. req.", "pr", "banfn")
+                    for c in _df_pr_chk.columns
+                )
+                if not _has_pr_col:
+                    _pr_missing.append("Purchase Requisition (or equivalent)")
+                if _pr_missing:
                     val_errors.append(
                         "**ME5A file is missing required columns:**\n\n"
-                        + "\n".join(f"- `{c}`" for c in missing_pr)
-                        + "\n\nMake sure your ME5A layout includes the Material and Purchase Requisition columns."
+                        + "\n".join(f"- `{c}`" for c in _pr_missing)
+                        + f"\n\nColumns found: {', '.join(_df_pr_chk.columns.tolist())}\n\n"
+                        + "Make sure your ME5A layout includes the Material and Purchase Requisition columns."
                     )
                 pr_file.seek(0)
             except Exception as e:
@@ -960,7 +988,7 @@ if "df_jobs" in st.session_state:
                 _tw_name = st.session_state["twowk_fname"]
             else:
                 _2wk_stamp = datetime.now().strftime("%Y-%m-%d")
-                _tw_data = _build_2wk_excel(df_2wk, df_comp, today_str)
+                _tw_data = _build_2wk_excel(df_2wk, df_comp, datetime.now().strftime("%d %b %Y"))
                 _tw_name = f"Next_2_Weeks_{_2wk_stamp}.xlsx"
             st.download_button(
                 label="Export Next 2 Weeks to Excel",

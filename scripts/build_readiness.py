@@ -180,12 +180,21 @@ def load_stock(
 def load_components(path: Path, today: pd.Timestamp, log: logging.Logger) -> pd.DataFrame:
     """Load COOIS and filter to relevant jobs."""
     df = pd.read_excel(path)
+    df.columns = df.columns.str.strip()
     log.debug(f"COOIS raw: {len(df)} rows")
 
     df["Material"] = df["Material"].astype(str).str.strip().replace("nan", "")
     df["Order"] = df["Order"].astype(str).str.strip()
-    df["Required"] = df["Requirement Quantity"].astype(float)
-    df["Withdrawn"] = df["Quantity withdrawn"].astype(float)
+
+    _req_col = _find_col(df, ["Requirement Quantity", "Reqmt Quantity", "Requirements Qty", "Requirement Qty", "Reqmt qty"])
+    _with_col = _find_col(df, ["Quantity withdrawn", "Qty withdrawn", "Withdrawn Quantity", "Withdrawn Qty", "Qty Withdrawn"])
+    if _req_col is None:
+        raise ValueError(f"Cannot find 'Requirement Quantity' column in COOIS. Columns found: {list(df.columns)}")
+    if _with_col is None:
+        raise ValueError(f"Cannot find 'Quantity withdrawn' column in COOIS. Columns found: {list(df.columns)}")
+    log.debug(f"COOIS qty columns: req='{_req_col}', withdrawn='{_with_col}'")
+    df["Required"] = pd.to_numeric(df[_req_col], errors="coerce").fillna(0)
+    df["Withdrawn"] = pd.to_numeric(df[_with_col], errors="coerce").fillna(0)
     df["To_Pick"] = (df["Required"] - df["Withdrawn"]).clip(lower=0)
     df["Start_Date"] = pd.to_datetime(df["Header Basic Start Date"], errors="coerce")
     df["Finish_Date"] = pd.to_datetime(df["Header Basic Finish Date"], errors="coerce")
@@ -207,6 +216,17 @@ def load_components(path: Path, today: pd.Timestamp, log: logging.Logger) -> pd.
     df = df[df["To_Pick"] > 0].copy()
     df = df[df["Days_to_Start"] >= -30].copy()
     df = df[df["Material"] != ""].copy()
+
+    phantom_col = _find_col(df, ["Phantom"])
+    if phantom_col:
+        before_phantom = len(df)
+        df = df[
+            ~df[phantom_col].astype(str).str.strip().str.upper().eq("X")
+        ].copy()
+        log.info(
+            f"Phantom filter: excluded {before_phantom - len(df)} rows "
+            f"where {phantom_col}=X"
+        )
 
     # Optional: exclude internally-manufactured components.
     # V1 (make-to-stock) items are stocked and can genuinely be short.

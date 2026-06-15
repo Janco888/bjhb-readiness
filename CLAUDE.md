@@ -52,6 +52,7 @@ Drop these two files into `inputs/` before running:
 ### `coois_components.xlsx`
 - Source: SAP Transaction **COOIS**, Component view
 - Required columns: `Order`, `Material`, `Material Description`, `Requirement Quantity`, `Quantity withdrawn`, `Procurement Type`, `Header Material Text`, `Header Basic Start Date`, `Header Basic Finish Date`, `Header SD order`
+- Optional columns: `MRP Type` (when present, only V1 rows kept — excludes phantom assemblies and internally-manufactured components), `Phantom item` (when present, rows marked X are excluded before simulation)
 - Filter: Plant 502, Status REL (Released), exclude DLV and TECO
 - Date range: today - 30 days → today + 90 days
 

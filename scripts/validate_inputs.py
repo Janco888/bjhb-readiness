@@ -29,7 +29,7 @@ REQUIRED_COOIS_COLUMNS = [
 ]
 
 # Optional but used by build_readiness.py with graceful fallback if absent
-RECOMMENDED_COOIS_COLUMNS = ["Header SD order", "MRP Type"]
+RECOMMENDED_COOIS_COLUMNS = ["Header SD order", "MRP Type", "Phantom"]
 
 # Procurement Type values the simulation recognises; others get treated as external
 KNOWN_PROC_TYPES = {"E", "F", "X", "U", ""}
@@ -130,6 +130,25 @@ def validate_coois(path: Path, verbose: bool = False) -> dict:
             f"  ! Unexpected Procurement Type values: {unknown_types} — "
             f"these will be treated as external (purchased) parts"
         )
+
+    phantom_cols = [
+        c for c in df.columns if "phantom" in str(c).lower().replace(" ", "")
+    ]
+    if phantom_cols:
+        phantom_col = phantom_cols[0]
+        n_phantom = int(
+            df[phantom_col]
+            .astype(str)
+            .str.strip()
+            .str.upper()
+            .eq("X")
+            .sum()
+        )
+        if n_phantom > 0:
+            print(
+                f"  ! COOIS phantom filter: {n_phantom} rows found with {phantom_col}=X — "
+                f"these will be excluded from stock availability simulation"
+            )
 
     stats = {
         "file": path.name,
