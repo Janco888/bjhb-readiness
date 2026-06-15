@@ -56,9 +56,13 @@ _PR_REQUIRED = ["Material", "Purchase Requisition"]
 
 
 def _col_exists_flexible(cols, variants: list[str]) -> bool:
-    """Case-insensitive, whitespace-stripped column lookup."""
-    norm = {c.lower().replace(" ", "").replace("-", "") for c in cols}
-    return any(v.lower().replace(" ", "").replace("-", "") in norm for v in variants)
+    """True if any col contains all words from any variant (handles SAP unit suffixes like '(EINHEIT)')."""
+    cols_lower = [c.lower() for c in cols]
+    for variant in variants:
+        words = variant.lower().split()
+        if any(all(w in col for w in words) for col in cols_lower):
+            return True
+    return False
 
 _APP_DIR = pathlib.Path(os.path.dirname(os.path.abspath(__file__)))
 _INPUTS_DIR = _APP_DIR / "inputs"
@@ -421,24 +425,11 @@ if _build_clicked:
             try:
                 _df_pr_chk = pd.read_excel(pr_file)
                 _df_pr_chk.columns = _df_pr_chk.columns.str.strip()
-                _pr_missing = []
                 if "Material" not in _df_pr_chk.columns:
-                    _pr_missing.append("Material")
-                # Accept any column with both "purchase" and "requisition" in the name,
-                # or common SAP short forms — matches the flexible logic in load_prs()
-                _has_pr_col = any(
-                    ("requisition" in c.lower() and "purchase" in c.lower())
-                    or c.lower() in ("purch. req.", "pr", "banfn")
-                    for c in _df_pr_chk.columns
-                )
-                if not _has_pr_col:
-                    _pr_missing.append("Purchase Requisition (or equivalent)")
-                if _pr_missing:
                     val_errors.append(
-                        "**ME5A file is missing required columns:**\n\n"
-                        + "\n".join(f"- `{c}`" for c in _pr_missing)
-                        + f"\n\nColumns found: {', '.join(_df_pr_chk.columns.tolist())}\n\n"
-                        + "Make sure your ME5A layout includes the Material and Purchase Requisition columns."
+                        "**ME5A file is missing the `Material` column.**\n\n"
+                        + f"Columns found: {', '.join(_df_pr_chk.columns.tolist())}\n\n"
+                        + "Make sure your ME5A layout includes the Material column."
                     )
                 pr_file.seek(0)
             except Exception as e:

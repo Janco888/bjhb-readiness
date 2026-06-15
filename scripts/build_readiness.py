@@ -186,8 +186,15 @@ def load_components(path: Path, today: pd.Timestamp, log: logging.Logger) -> pd.
     df["Material"] = df["Material"].astype(str).str.strip().replace("nan", "")
     df["Order"] = df["Order"].astype(str).str.strip()
 
-    _req_col = _find_col(df, ["Requirement Quantity", "Reqmt Quantity", "Requirements Qty", "Requirement Qty", "Reqmt qty"])
-    _with_col = _find_col(df, ["Quantity withdrawn", "Qty withdrawn", "Withdrawn Quantity", "Withdrawn Qty", "Qty Withdrawn"])
+    # Use substring matching to tolerate SAP unit suffixes like "(EINHEIT)" or "(MEINS)"
+    _req_col = next(
+        (c for c in df.columns if "requirement" in c.lower() and "quantity" in c.lower()),
+        None,
+    )
+    _with_col = next(
+        (c for c in df.columns if "withdrawn" in c.lower()),
+        None,
+    )
     if _req_col is None:
         raise ValueError(f"Cannot find 'Requirement Quantity' column in COOIS. Columns found: {list(df.columns)}")
     if _with_col is None:
