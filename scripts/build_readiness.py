@@ -901,7 +901,18 @@ def load_coois_header(path_or_file, log: logging.Logger) -> pd.DataFrame:
     df = pd.read_excel(path_or_file)
     df.columns = df.columns.str.strip()
     df["Order"] = df["Order"].astype(str).str.strip().str.split(".").str[0]
-    df["Superior Order"] = df["Superior Order"].astype(str).str.strip().str.split(".").str[0]
+
+    sup_col = _find_col(df, ["Superior Order", "Superior order", "Sup. Order", "Higher-level order"])
+    if sup_col is None:
+        sup_col = next((c for c in df.columns if "superior" in c.lower() or "higher-level" in c.lower()), None)
+    if sup_col is None:
+        log.warning(
+            f"COOIS Header: 'Superior Order' column not found — sub-assembly risk unavailable. "
+            f"Columns: {list(df.columns)}"
+        )
+        return pd.DataFrame(columns=["Order", "Superior Order", "Material Description"])
+
+    df["Superior Order"] = df[sup_col].astype(str).str.strip().str.split(".").str[0]
     df["Superior Order"] = df["Superior Order"].where(df["Superior Order"] != "nan", None)
     if "Basic finish date" in df.columns:
         df["Basic finish date"] = pd.to_datetime(df["Basic finish date"], errors="coerce")

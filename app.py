@@ -463,7 +463,12 @@ if _build_clicked:
             df_comp_raw = load_components(coois_file, today, log)
             df_pos = load_pos(po_file, log) if po_file else None
             df_prs = load_prs(pr_file, log) if pr_file else None
-            df_header = load_coois_header(header_file, log) if header_file else None
+            df_header = None
+            if header_file:
+                try:
+                    df_header = load_coois_header(header_file, log)
+                except Exception as e:
+                    log.warning(f"COOIS Header file could not be loaded ({e}) — running without sub-assembly risk")
 
             if ops_file:
                 ops_file.seek(0)
